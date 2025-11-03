@@ -11,6 +11,7 @@ import USLegalAPI from "./us-legal-apis.js";
 const usLegalAPI = new USLegalAPI({
   congress: process.env.CONGRESS_API_KEY,
   regulationsGov: process.env.REGULATIONS_GOV_API_KEY,
+  courtListener: process.env.COURT_LISTENER_API_KEY,
 });
 
 // Create MCP server
@@ -218,6 +219,118 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "search_court_opinions": {
+        const { query, court, limit } = args as {
+          query: string;
+          court?: string;
+          limit?: number;
+        };
+        const opinions = await usLegalAPI.courtListener.searchOpinions(
+          query,
+          court,
+          limit,
+        );
+
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `**Court Opinions Search Results for "${query}"**\n\nFound ${opinions.length} result(s)\n\n` +
+                opinions
+                  .map(
+                    (opinion, index) =>
+                      `${index + 1}. **${opinion.case_name}**\n   Court: ${opinion.court} - ${opinion.date_filed}\n   ${opinion.precedential_status}\n   ${opinion.url}\n`,
+                  )
+                  .join("\n"),
+            },
+          ],
+        };
+      }
+
+      case "get_recent_court_opinions": {
+        const { court, limit } = args as {
+          court?: string;
+          limit?: number;
+        };
+        const opinions = await usLegalAPI.courtListener.getRecentOpinions(
+          court,
+          limit,
+        );
+
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `**Recent Court Opinions**\n\nFound ${opinions.length} result(s)\n\n` +
+                opinions
+                  .map(
+                    (opinion, index) =>
+                      `${index + 1}. **${opinion.case_name}**\n   Court: ${opinion.court} - ${opinion.date_filed}\n   ${opinion.precedential_status}\n   ${opinion.url}\n`,
+                  )
+                  .join("\n"),
+            },
+          ],
+        };
+      }
+
+      case "search_congress_votes": {
+        const { congress, chamber, limit } = args as {
+          congress?: number;
+          chamber?: "House" | "Senate";
+          limit?: number;
+        };
+        const votes = await usLegalAPI.congress.searchVotes(
+          congress,
+          chamber,
+          limit,
+        );
+
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `**Congress Votes**\n\nFound ${votes.length} result(s)\n\n` +
+                votes
+                  .map(
+                    (vote, index) =>
+                      `${index + 1}. **${vote.voteTitle}**\n   ${vote.chamber} - ${vote.voteDate}\n   Result: ${vote.voteResult}\n   ${vote.url}\n`,
+                  )
+                  .join("\n"),
+            },
+          ],
+        };
+      }
+
+      case "get_congress_committees": {
+        const { congress, chamber } = args as {
+          congress?: number;
+          chamber?: "House" | "Senate";
+        };
+        const committees = await usLegalAPI.congress.getCommittees(
+          congress,
+          chamber,
+        );
+
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `**Congress Committees**\n\nFound ${committees.length} result(s)\n\n` +
+                committees
+                  .map(
+                    (committee, index) =>
+                      `${index + 1}. **${committee.name}**\n   ${committee.chamber || "N/A"} - ${committee.committeeType || "N/A"}\n   ${committee.url}\n`,
+                  )
+                  .join("\n"),
+            },
+          ],
+        };
+      }
+
       default:
         return {
           content: [
@@ -399,6 +512,103 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               minimum: 1,
               maximum: 50,
               default: 20,
+            },
+          },
+        },
+      },
+      {
+        name: "search_court_opinions",
+        description:
+          "Search for court opinions and decisions from CourtListener (federal and state courts)",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: {
+              type: "string",
+              description:
+                "Search query for court opinions (e.g., 'immigration', 'copyright', 'constitutional')",
+            },
+            court: {
+              type: "string",
+              description:
+                "Optional court filter (e.g., 'scotus', 'ca1', 'ca2')",
+            },
+            limit: {
+              type: "number",
+              description: "Number of results to return (max 50)",
+              minimum: 1,
+              maximum: 50,
+              default: 20,
+            },
+          },
+          required: ["query"],
+        },
+      },
+      {
+        name: "get_recent_court_opinions",
+        description:
+          "Get the most recently published court opinions from CourtListener",
+        inputSchema: {
+          type: "object",
+          properties: {
+            court: {
+              type: "string",
+              description:
+                "Optional court filter (e.g., 'scotus', 'ca1', 'ca2')",
+            },
+            limit: {
+              type: "number",
+              description: "Number of results to return (max 50)",
+              minimum: 1,
+              maximum: 50,
+              default: 20,
+            },
+          },
+        },
+      },
+      {
+        name: "search_congress_votes",
+        description: "Search for voting records in Congress",
+        inputSchema: {
+          type: "object",
+          properties: {
+            congress: {
+              type: "number",
+              description: "Congress number (e.g., 118 for current Congress)",
+              minimum: 100,
+              maximum: 120,
+            },
+            chamber: {
+              type: "string",
+              enum: ["House", "Senate"],
+              description: "Chamber filter (House or Senate)",
+            },
+            limit: {
+              type: "number",
+              description: "Number of results to return (max 50)",
+              minimum: 1,
+              maximum: 50,
+              default: 20,
+            },
+          },
+        },
+      },
+      {
+        name: "get_congress_committees",
+        description: "Get list of Congressional committees",
+        inputSchema: {
+          type: "object",
+          properties: {
+            congress: {
+              type: "number",
+              description: "Congress number (e.g., 118 for current Congress)",
+              minimum: 100,
+              maximum: 120,
+            },
+            chamber: {
+              type: "string",
+              enum: ["House", "Senate"],
+              description: "Chamber filter (House or Senate)",
             },
           },
         },

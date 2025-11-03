@@ -10,6 +10,7 @@ export const API_ENDPOINTS = {
   US_CODE: "https://uscode.house.gov/api",
   REGULATIONS_GOV: "https://api.regulations.gov/v4",
   GPO: "https://api.govinfo.gov",
+  COURT_LISTENER: "https://www.courtlistener.com/api/rest/v3",
 } as const;
 
 // Types for US Legal Data
@@ -70,6 +71,68 @@ export interface RegulationComment {
   document_id: string;
   submitter_name?: string;
   organization?: string;
+}
+
+export interface CourtOpinion {
+  id: number;
+  case_name: string;
+  case_name_full?: string;
+  date_filed: string;
+  date_modified?: string;
+  court: string;
+  court_id: number;
+  jurisdiction: string;
+  citation?: string;
+  citation_count?: number;
+  precedential_status: string;
+  url: string;
+  absolute_url: string;
+  download_url?: string;
+  plain_text?: string;
+  html?: string;
+  html_lawbox?: string;
+  html_columbia?: string;
+  html_anon_2020?: string;
+  judges?: string[];
+  docket?: string;
+  docket_number?: string;
+  slug?: string;
+}
+
+export interface CongressVote {
+  rollNumber: number;
+  url: string;
+  voteDate: string;
+  voteQuestion: string;
+  voteResult: string;
+  voteTitle: string;
+  voteType: string;
+  chamber: string;
+  congress: number;
+  session: number;
+  members?: Array<{
+    member: {
+      bioguideId: string;
+      firstName: string;
+      lastName: string;
+      party: string;
+      state: string;
+    };
+    votePosition: string;
+  }>;
+}
+
+export interface Committee {
+  systemCode: string;
+  name: string;
+  url: string;
+  chamber?: string;
+  committeeType?: string;
+  subcommittees?: Array<{
+    systemCode: string;
+    name: string;
+    url: string;
+  }>;
 }
 
 // Congress.gov API Functions
@@ -220,6 +283,102 @@ export class CongressAPI {
       );
     } catch (error) {
       console.error("Congress API error:", error);
+      return [];
+    }
+  }
+
+  async searchVotes(
+    congress?: number,
+    chamber?: "House" | "Senate",
+    limit: number = 20,
+  ): Promise<CongressVote[]> {
+    try {
+      const params = new URLSearchParams({
+        limit: limit.toString(),
+        format: "json",
+        ...(this.apiKey && { api_key: this.apiKey }),
+        ...(congress && { congress: congress.toString() }),
+        ...(chamber && { chamber }),
+      });
+
+      const response = await axios.get(
+        `${API_ENDPOINTS.CONGRESS}/vote?${params}`,
+      );
+
+      return (
+        response.data.votes?.map((vote: any) => ({
+          rollNumber: vote.rollNumber,
+          url: vote.url,
+          voteDate: vote.voteDate,
+          voteQuestion: vote.voteQuestion,
+          voteResult: vote.voteResult,
+          voteTitle: vote.voteTitle,
+          voteType: vote.voteType,
+          chamber: vote.chamber,
+          congress: vote.congress,
+          session: vote.session,
+          members: vote.members?.map((m: any) => ({
+            member: {
+              bioguideId: m.member?.bioguideId,
+              firstName: m.member?.firstName,
+              lastName: m.member?.lastName,
+              party: m.member?.party,
+              state: m.member?.state,
+            },
+            votePosition: m.votePosition,
+          })),
+        })) || []
+      );
+    } catch (error: any) {
+      if (error.response?.status === 403) {
+        console.error(
+          "Congress API: API key required for votes/committees. Get one at https://api.congress.gov/",
+        );
+      } else {
+        console.error("Congress API error:", error.message || error);
+      }
+      return [];
+    }
+  }
+
+  async getCommittees(
+    congress?: number,
+    chamber?: "House" | "Senate",
+  ): Promise<Committee[]> {
+    try {
+      const params = new URLSearchParams({
+        format: "json",
+        ...(this.apiKey && { api_key: this.apiKey }),
+        ...(congress && { congress: congress.toString() }),
+        ...(chamber && { chamber }),
+      });
+
+      const response = await axios.get(
+        `${API_ENDPOINTS.CONGRESS}/committee?${params}`,
+      );
+
+      return (
+        response.data.committees?.map((committee: any) => ({
+          systemCode: committee.systemCode,
+          name: committee.name,
+          url: committee.url,
+          chamber: committee.chamber,
+          committeeType: committee.committeeType,
+          subcommittees: committee.subcommittees?.map((sub: any) => ({
+            systemCode: sub.systemCode,
+            name: sub.name,
+            url: sub.url,
+          })),
+        })) || []
+      );
+    } catch (error: any) {
+      if (error.response?.status === 403) {
+        console.error(
+          "Congress API: API key required for votes/committees. Get one at https://api.congress.gov/",
+        );
+      } else {
+        console.error("Congress API error:", error.message || error);
+      }
       return [];
     }
   }
@@ -386,6 +545,206 @@ export class USCodeAPI {
   }
 }
 
+// CourtListener API Functions
+export class CourtListenerAPI {
+  private apiKey?: string;
+
+  constructor(apiKey?: string) {
+    // CourtListener API doesn't require key but has rate limits without one
+    this.apiKey = apiKey || process.env.COURT_LISTENER_API_KEY;
+  }
+
+  async searchOpinions(
+    query: string,
+    court?: string,
+    limit: number = 20,
+  ): Promise<CourtOpinion[]> {
+    try {
+      const params = new URLSearchParams({
+        q: query,
+        type: "o", // 'o' for opinions
+        page_size: limit.toString(),
+        ordering: "-date_filed",
+        ...(court && { court: court }),
+      });
+
+      const headers: Record<string, string> = {
+        Accept: "application/json",
+      };
+      if (this.apiKey) {
+        headers["Authorization"] = `Token ${this.apiKey}`;
+      }
+
+      const response = await axios.get(
+        `${API_ENDPOINTS.COURT_LISTENER}/search/`,
+        { params, headers },
+      );
+
+      return (
+        response.data.results?.map((opinion: any) => {
+          const absoluteUrl =
+            opinion.absoluteUrl ||
+            opinion.absolute_url ||
+            (opinion.id
+              ? `https://www.courtlistener.com/opinion/${opinion.id}/`
+              : undefined);
+          return {
+            id: opinion.id,
+            case_name: opinion.caseName || opinion.case_name,
+            case_name_full: opinion.caseNameFull || opinion.case_name_full,
+            date_filed: opinion.dateFiled || opinion.date_filed,
+            date_modified: opinion.dateModified || opinion.date_modified,
+            court: opinion.court || opinion.court_name,
+            court_id: opinion.courtId || opinion.court_id,
+            jurisdiction: opinion.jurisdiction,
+            citation: opinion.citation,
+            citation_count: opinion.citationCount || opinion.citation_count,
+            precedential_status:
+              opinion.precedentialStatus || opinion.precedential_status,
+            url: absoluteUrl,
+            absolute_url: absoluteUrl,
+            download_url: opinion.downloadUrl || opinion.download_url,
+            plain_text: opinion.plainText || opinion.plain_text,
+            html: opinion.html,
+            html_lawbox: opinion.htmlLawbox || opinion.html_lawbox,
+            html_columbia: opinion.htmlColumbia || opinion.html_columbia,
+            html_anon_2020: opinion.htmlAnon2020 || opinion.html_anon_2020,
+            judges: opinion.judges,
+            docket: opinion.docket,
+            docket_number: opinion.docketNumber || opinion.docket_number,
+            slug: opinion.slug,
+          };
+        }) || []
+      );
+    } catch (error: any) {
+      if (error.response?.status === 403) {
+        console.error(
+          "CourtListener API: API key required. Get one at https://www.courtlistener.com/api/",
+        );
+      } else {
+        console.error("CourtListener API error:", error.message || error);
+      }
+      return [];
+    }
+  }
+
+  async getRecentOpinions(
+    court?: string,
+    limit: number = 20,
+  ): Promise<CourtOpinion[]> {
+    try {
+      const params = new URLSearchParams({
+        type: "o", // 'o' for opinions
+        page_size: limit.toString(),
+        ordering: "-date_filed",
+        ...(court && { court: court }),
+      });
+
+      const headers: Record<string, string> = {
+        Accept: "application/json",
+      };
+      if (this.apiKey) {
+        headers["Authorization"] = `Token ${this.apiKey}`;
+      }
+
+      const response = await axios.get(
+        `${API_ENDPOINTS.COURT_LISTENER}/search/`,
+        { params, headers },
+      );
+
+      return (
+        response.data.results?.map((opinion: any) => {
+          const absoluteUrl =
+            opinion.absoluteUrl ||
+            opinion.absolute_url ||
+            (opinion.id
+              ? `https://www.courtlistener.com/opinion/${opinion.id}/`
+              : undefined);
+          return {
+            id: opinion.id,
+            case_name: opinion.caseName || opinion.case_name,
+            case_name_full: opinion.caseNameFull || opinion.case_name_full,
+            date_filed: opinion.dateFiled || opinion.date_filed,
+            date_modified: opinion.dateModified || opinion.date_modified,
+            court: opinion.court || opinion.court_name,
+            court_id: opinion.courtId || opinion.court_id,
+            jurisdiction: opinion.jurisdiction,
+            citation: opinion.citation,
+            citation_count: opinion.citationCount || opinion.citation_count,
+            precedential_status:
+              opinion.precedentialStatus || opinion.precedential_status,
+            url: absoluteUrl,
+            absolute_url: absoluteUrl,
+            download_url: opinion.downloadUrl || opinion.download_url,
+            plain_text: opinion.plainText || opinion.plain_text,
+            html: opinion.html,
+            html_lawbox: opinion.htmlLawbox || opinion.html_lawbox,
+            html_columbia: opinion.htmlColumbia || opinion.html_columbia,
+            html_anon_2020: opinion.htmlAnon2020 || opinion.html_anon_2020,
+            judges: opinion.judges,
+            docket: opinion.docket,
+            docket_number: opinion.docketNumber || opinion.docket_number,
+            slug: opinion.slug,
+          };
+        }) || []
+      );
+    } catch (error: any) {
+      if (error.response?.status === 403) {
+        console.error(
+          "CourtListener API: API key required. Get one at https://www.courtlistener.com/api/",
+        );
+      } else {
+        console.error("CourtListener API error:", error.message || error);
+      }
+      return [];
+    }
+  }
+
+  async getOpinion(opinionId: number): Promise<CourtOpinion | null> {
+    try {
+      const headers: Record<string, string> = {};
+      if (this.apiKey) {
+        headers["Authorization"] = `Token ${this.apiKey}`;
+      }
+
+      const response = await axios.get(
+        `${API_ENDPOINTS.COURT_LISTENER}/search/${opinionId}/`,
+        { headers },
+      );
+
+      const opinion = response.data;
+      return {
+        id: opinion.id,
+        case_name: opinion.caseName,
+        case_name_full: opinion.caseNameFull,
+        date_filed: opinion.dateFiled,
+        date_modified: opinion.dateModified,
+        court: opinion.court,
+        court_id: opinion.courtId,
+        jurisdiction: opinion.jurisdiction,
+        citation: opinion.citation,
+        citation_count: opinion.citationCount,
+        precedential_status: opinion.precedentialStatus,
+        url: opinion.absoluteUrl,
+        absolute_url: opinion.absoluteUrl,
+        download_url: opinion.downloadUrl,
+        plain_text: opinion.plainText,
+        html: opinion.html,
+        html_lawbox: opinion.htmlLawbox,
+        html_columbia: opinion.htmlColumbia,
+        html_anon_2020: opinion.htmlAnon2020,
+        judges: opinion.judges,
+        docket: opinion.docket,
+        docket_number: opinion.docketNumber,
+        slug: opinion.slug,
+      };
+    } catch (error) {
+      console.error("CourtListener API error:", error);
+      return null;
+    }
+  }
+}
+
 // Regulations.gov API Functions
 export class RegulationsGovAPI {
   private apiKey: string;
@@ -434,12 +793,18 @@ export class USLegalAPI {
   public federalRegister: FederalRegisterAPI;
   public usCode: USCodeAPI;
   public regulations: RegulationsGovAPI;
+  public courtListener: CourtListenerAPI;
 
-  constructor(apiKeys?: { congress?: string; regulationsGov?: string }) {
+  constructor(apiKeys?: {
+    congress?: string;
+    regulationsGov?: string;
+    courtListener?: string;
+  }) {
     this.congress = new CongressAPI(apiKeys?.congress);
     this.federalRegister = new FederalRegisterAPI();
     this.usCode = new USCodeAPI();
     this.regulations = new RegulationsGovAPI(apiKeys?.regulationsGov);
+    this.courtListener = new CourtListenerAPI(apiKeys?.courtListener);
   }
 
   // Comprehensive search across all sources
