@@ -3,6 +3,119 @@
 
 import axios from "axios";
 
+// Relevance scoring utilities
+function calculateRelevanceScore(text: string, query: string): number {
+  if (!text || !query) return 0;
+
+  const lowerText = text.toLowerCase();
+  const queryTerms = query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((term) => term.length > 2);
+
+  if (queryTerms.length === 0) return 0;
+
+  let score = 0;
+  const exactMatch = lowerText.includes(query.toLowerCase());
+  if (exactMatch) score += 10;
+
+  // Count how many query terms appear
+  let matchedTerms = 0;
+  for (const term of queryTerms) {
+    if (lowerText.includes(term)) {
+      matchedTerms++;
+      // Bonus for term appearing multiple times
+      const occurrences = (lowerText.match(new RegExp(term, "g")) || []).length;
+      score += Math.min(occurrences, 3);
+    }
+  }
+
+  // Bonus for all terms matching
+  if (matchedTerms === queryTerms.length) score += 5;
+
+  // Bonus for title/short title match (handled in specific scoring functions)
+  return score;
+}
+
+function scoreBillRelevance(bill: any, query: string): number {
+  let score = 0;
+  const queryLower = query.toLowerCase();
+  const queryTerms = queryLower.split(/\s+/).filter((term) => term.length > 2);
+
+  // High weight for title matches
+  if (bill.title) {
+    const titleScore = calculateRelevanceScore(bill.title, query);
+    score += titleScore * 4; // Increased from 3
+  }
+
+  if (bill.shortTitle) {
+    const shortTitleScore = calculateRelevanceScore(bill.shortTitle, query);
+    score += shortTitleScore * 4; // Increased from 3
+  }
+
+  // Medium weight for summary
+  if (bill.summary?.text) {
+    score += calculateRelevanceScore(bill.summary.text, query) * 2;
+  }
+
+  // Check latest action text
+  if (bill.latestAction?.text) {
+    const actionScore = calculateRelevanceScore(bill.latestAction.text, query);
+    score += actionScore * 1.5;
+  }
+
+  // Enhanced subject/topic matching - check each query term individually
+  if (bill.subjects && queryTerms.length > 0) {
+    for (const subject of bill.subjects) {
+      const subjectName = (
+        typeof subject === "string" ? subject : subject.name || ""
+      ).toLowerCase();
+
+      // Check if any query term matches the subject
+      for (const term of queryTerms) {
+        if (subjectName.includes(term)) {
+          score += 20; // Increased from 15
+          break; // Only count once per subject
+        }
+      }
+    }
+  }
+
+  return score;
+}
+
+function scoreDocumentRelevance(doc: any, query: string): number {
+  let score = 0;
+
+  // High weight for title
+  if (doc.title) {
+    score += calculateRelevanceScore(doc.title, query) * 3;
+  }
+
+  // Medium weight for abstract
+  if (doc.abstract) {
+    score += calculateRelevanceScore(doc.abstract, query) * 2;
+  }
+
+  // Check agency names for relevance by matching query terms against agency names
+  if (doc.agency_names && Array.isArray(doc.agency_names)) {
+    const queryTerms = query
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((term) => term.length > 2);
+    for (const agency of doc.agency_names) {
+      const agencyLower = agency.toLowerCase();
+      // Check if any query term appears in the agency name
+      const agencyMatch = queryTerms.some((term) => agencyLower.includes(term));
+      if (agencyMatch) {
+        score += 10;
+      }
+    }
+  }
+
+  return score;
+}
+
 // API Base URLs
 export const API_ENDPOINTS = {
   CONGRESS: "https://api.congress.gov/v3",
@@ -149,9 +262,12 @@ export class CongressAPI {
     limit: number = 20,
   ): Promise<CongressBill[]> {
     try {
+      // Get more results than needed for filtering (increased for better relevance)
+      const fetchLimit = Math.min(limit * 5, 250);
+
       const params = new URLSearchParams({
         q: query,
-        limit: limit.toString(),
+        limit: fetchLimit.toString(),
         format: "json",
         ...(this.apiKey && { api_key: this.apiKey }),
         ...(congress && { congress: congress.toString() }),
@@ -161,32 +277,73 @@ export class CongressAPI {
         `${API_ENDPOINTS.CONGRESS}/bill?${params}`,
       );
 
-      return (
-        response.data.bills?.map((bill: any) => ({
-          congress: bill.congress,
-          type: bill.type,
-          number: bill.number,
-          title: bill.title,
-          shortTitle: bill.shortTitle,
-          summary: bill.summary?.text,
-          url: bill.url,
-          introducedDate: bill.introducedDate,
-          latestAction: bill.latestAction
-            ? {
-                actionDate: bill.latestAction.actionDate,
-                text: bill.latestAction.text,
-              }
-            : undefined,
-          subjects: bill.subjects?.map((s: any) => s.name),
-          sponsors: bill.sponsors?.map((s: any) => ({
-            bioguideId: s.bioguideId,
-            firstName: s.firstName,
-            lastName: s.lastName,
-            party: s.party,
-            state: s.state,
-          })),
-        })) || []
+      const bills = (response.data.bills || []).map((bill: any) => ({
+        congress: bill.congress,
+        type: bill.type,
+        number: bill.number,
+        title: bill.title,
+        shortTitle: bill.shortTitle,
+        summary: bill.summary?.text,
+        url: bill.url,
+        introducedDate: bill.introducedDate,
+        latestAction: bill.latestAction
+          ? {
+              actionDate: bill.latestAction.actionDate,
+              text: bill.latestAction.text,
+            }
+          : undefined,
+        subjects: bill.subjects?.map((s: any) => s.name || s),
+        sponsors: bill.sponsors?.map((s: any) => ({
+          bioguideId: s.bioguideId,
+          firstName: s.firstName,
+          lastName: s.lastName,
+          party: s.party,
+          state: s.state,
+        })),
+      }));
+
+      // Score and sort by relevance
+      const scoredBills = bills.map((bill: any) => ({
+        ...bill,
+        relevanceScore: scoreBillRelevance(bill, query),
+      }));
+
+      // Sort by relevance (highest first)
+      scoredBills.sort((a: any, b: any) => b.relevanceScore - a.relevanceScore);
+
+      // Log scoring for debugging (first few bills)
+      if (scoredBills.length > 0) {
+        console.error(
+          `Congress Bills Relevance Scores (top 5): ${scoredBills
+            .slice(0, 5)
+            .map(
+              (b: any) =>
+                `${b.title.substring(0, 40)}... (score: ${b.relevanceScore})`,
+            )
+            .join(", ")}`,
+        );
+      }
+
+      // Use smart filtering: prioritize high-scoring bills but always return top results
+      // Only filter if we have many high-scoring options
+      const highRelevanceBills = scoredBills.filter(
+        (bill: any) => bill.relevanceScore >= 5,
       );
+
+      if (highRelevanceBills.length >= limit) {
+        // We have enough high-relevance results, return those
+        return highRelevanceBills
+          .slice(0, limit)
+          .map(({ relevanceScore, ...bill }: any) => bill);
+      } else if (scoredBills.length > 0) {
+        // Return top results sorted by relevance, even if scores are low
+        // This ensures we always return something if the API returned results
+        return scoredBills
+          .slice(0, limit)
+          .map(({ relevanceScore, ...bill }: any) => bill);
+      }
+
+      return [];
     } catch (error) {
       console.error("Congress API error:", error);
       return [];
@@ -391,9 +548,12 @@ export class FederalRegisterAPI {
     limit: number = 20,
   ): Promise<FederalRegisterDocument[]> {
     try {
+      // Get more results than needed for filtering
+      const fetchLimit = Math.min(limit * 3, 100);
+
       const params = new URLSearchParams({
         q: query,
-        per_page: limit.toString(),
+        per_page: fetchLimit.toString(),
         order: "relevance",
       });
 
@@ -401,20 +561,42 @@ export class FederalRegisterAPI {
         `${API_ENDPOINTS.FEDERAL_REGISTER}/documents?${params}`,
       );
 
-      return (
-        response.data.results?.map((doc: any) => ({
-          document_number: doc.document_number,
-          title: doc.title,
-          abstract: doc.abstract,
-          publication_date: doc.publication_date,
-          effective_date: doc.effective_date,
-          agency_names: doc.agency_names,
-          document_type: doc.document_type,
-          pdf_url: doc.pdf_url,
-          html_url: doc.html_url,
-          json_url: doc.json_url,
-        })) || []
-      );
+      const documents = (response.data.results || []).map((doc: any) => ({
+        document_number: doc.document_number,
+        title: doc.title,
+        abstract: doc.abstract,
+        publication_date: doc.publication_date,
+        effective_date: doc.effective_date,
+        agency_names: doc.agency_names,
+        document_type: doc.document_type,
+        pdf_url: doc.pdf_url,
+        html_url: doc.html_url,
+        json_url: doc.json_url,
+      }));
+
+      // Score and sort by relevance
+      const scoredDocs = documents.map((doc: any) => ({
+        ...doc,
+        relevanceScore: scoreDocumentRelevance(doc, query),
+      }));
+
+      // Sort by relevance (highest first)
+      scoredDocs.sort((a: any, b: any) => b.relevanceScore - a.relevanceScore);
+
+      // Filter out very low relevance results (score < 5) and return top results
+      const relevantDocs = scoredDocs
+        .filter((doc: any) => doc.relevanceScore >= 5)
+        .slice(0, limit)
+        .map(({ relevanceScore, ...doc }: any) => doc); // Remove score from output
+
+      // If we filtered out too many, return the top results even if low score
+      if (relevantDocs.length < limit && scoredDocs.length > 0) {
+        return scoredDocs
+          .slice(0, limit)
+          .map(({ relevanceScore, ...doc }: any) => doc);
+      }
+
+      return relevantDocs;
     } catch (error) {
       console.error("Federal Register API error:", error);
       return [];
@@ -500,9 +682,22 @@ export class USCodeAPI {
         ...(title && { title: title.toString() }),
       });
 
+      // Add timeout and retry logic for US Code API
       const response = await axios.get(
         `${API_ENDPOINTS.US_CODE}/search?${params}`,
+        {
+          timeout: 30000, // 30 second timeout
+          validateStatus: (status) => status < 500, // Don't throw on 4xx
+        },
       );
+
+      // Handle API errors gracefully
+      if (response.status >= 400) {
+        console.error(
+          `US Code API error: ${response.status} - ${response.statusText}`,
+        );
+        return [];
+      }
 
       return (
         response.data.results?.map((section: any) => ({
@@ -514,8 +709,18 @@ export class USCodeAPI {
           source: section.source,
         })) || []
       );
-    } catch (error) {
-      console.error("US Code API error:", error);
+    } catch (error: any) {
+      if (error.code === "ETIMEDOUT" || error.code === "ECONNABORTED") {
+        console.error(
+          "US Code API: Connection timeout. The API may be temporarily unavailable.",
+        );
+      } else if (error.code === "ECONNREFUSED") {
+        console.error(
+          "US Code API: Connection refused. The API endpoint may be down.",
+        );
+      } else {
+        console.error("US Code API error:", error.message || error);
+      }
       return [];
     }
   }

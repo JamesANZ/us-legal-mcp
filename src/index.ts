@@ -64,7 +64,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               content: [
                 {
                   type: "text",
-                  text: `**Congress Bills Search Results for "${query}"**\n\nNo bills found matching your search query.\n\n**Troubleshooting:**\n- Try broader search terms\n- Verify Congress.gov API key is set (CONGRESS_API_KEY)\n- Check if search is for a specific Congress session\n- Note: Some topics may have limited federal legislation`,
+                  text: `**Congress Bills Search Results for "${query}"**\n\nNo bills found matching your search query.\n\n**Troubleshooting:**\n- Try broader or different search terms (e.g., "border" instead of "immigration")\n- Verify Congress.gov API key is set (CONGRESS_API_KEY)\n- Try a different Congress session (e.g., 118 instead of 119)\n- The API may have returned results but they were filtered for low relevance\n- Note: Some topics may have limited federal legislation\n\n**Tip:** Use \`get_recent_bills\` to see recent legislation regardless of topic.`,
                 },
               ],
             };
@@ -121,62 +121,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      case "search_us_code": {
-        const { query, title, limit } = args as {
-          query: string;
-          title?: number;
-          limit?: number;
-        };
-        const sections = await usLegalAPI.usCode.searchCode(
-          query,
-          title,
-          limit,
-        );
-
-        return {
-          content: [
-            {
-              type: "text",
-              text:
-                `**US Code Search Results for "${query}"**\n\nFound ${sections.length} result(s)\n\n` +
-                sections
-                  .map(
-                    (section, index) =>
-                      `${index + 1}. **Section ${section.section}**\n   Title ${section.title}, Section ${section.section}\n   ${section.url}\n`,
-                  )
-                  .join("\n"),
-            },
-          ],
-        };
-      }
-
-      case "search_public_comments": {
-        const { query, limit } = args as { query: string; limit?: number };
-        const comments = await usLegalAPI.regulations.searchComments(
-          query,
-          limit,
-        );
-
-        return {
-          content: [
-            {
-              type: "text",
-              text:
-                `**Public Comments Search Results for "${query}"**\n\nFound ${comments.length} result(s)\n\n` +
-                comments
-                  .map(
-                    (comment: any, index: number) =>
-                      `${index + 1}. **${comment.title}**\n   ${comment.organization} - ${comment.posted_date}\n   ${comment.url}\n`,
-                  )
-                  .join("\n"),
-            },
-          ],
-        };
-      }
-
       case "search_all_legal": {
         const { query, limit } = args as { query: string; limit?: number };
-        const results = await usLegalAPI.searchAll(query, limit);
+
+        // Search only working sources
+        const [bills, regulations, opinions] = await Promise.all([
+          usLegalAPI.congress.searchBills(
+            query,
+            undefined,
+            Math.ceil((limit || 10) / 3),
+          ),
+          usLegalAPI.federalRegister.searchDocuments(
+            query,
+            Math.ceil((limit || 10) / 3),
+          ),
+          usLegalAPI.courtListener.searchOpinions(
+            query,
+            undefined,
+            Math.ceil((limit || 10) / 3),
+          ),
+        ]);
 
         return {
           content: [
@@ -184,25 +148,47 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               type: "text",
               text:
                 `**Comprehensive US Legal Search Results for "${query}"**\n\n` +
-                `- Bills: ${results.bills.length}\n` +
-                `- Regulations: ${results.regulations.length}\n` +
-                `- Code Sections: ${results.codeSections.length}\n` +
-                `- Comments: ${results.comments.length}\n\n` +
+                `- Bills: ${bills.length}\n` +
+                `- Regulations: ${regulations.length}\n` +
+                `- Court Opinions: ${opinions.length}\n\n` +
                 `**Top Results:**\n\n` +
-                results.bills
-                  .slice(0, 3)
-                  .map(
-                    (bill, index) =>
-                      `${index + 1}. **${bill.title}** (Bill)\n   ${bill.type} ${bill.number}\n   ${bill.url}\n`,
-                  )
-                  .join("\n") +
-                results.regulations
-                  .slice(0, 3)
-                  .map(
-                    (doc, index) =>
-                      `${index + 1}. **${doc.title}** (Regulation)\n   ${doc.document_number}\n   ${doc.html_url}\n`,
-                  )
-                  .join("\n"),
+                (bills.length > 0
+                  ? `**Congress Bills (${bills.length}):**\n` +
+                    bills
+                      .slice(0, 3)
+                      .map(
+                        (bill, index) =>
+                          `${index + 1}. **${bill.title}** (Bill)\n   ${bill.type} ${bill.number}\n   ${bill.url}\n`,
+                      )
+                      .join("\n") +
+                    "\n\n"
+                  : "") +
+                (regulations.length > 0
+                  ? `**Federal Register (${regulations.length}):**\n` +
+                    regulations
+                      .slice(0, 3)
+                      .map(
+                        (doc, index) =>
+                          `${index + 1}. **${doc.title}** (Regulation)\n   ${doc.document_number}\n   ${doc.html_url}\n`,
+                      )
+                      .join("\n") +
+                    "\n\n"
+                  : "") +
+                (opinions.length > 0
+                  ? `**Court Opinions (${opinions.length}):**\n` +
+                    opinions
+                      .slice(0, 3)
+                      .map(
+                        (opinion, index) =>
+                          `${index + 1}. **${opinion.case_name}** (Court Case)\n   ${opinion.court} - ${opinion.date_filed}\n   ${opinion.url}\n`,
+                      )
+                      .join("\n")
+                  : "") +
+                (bills.length === 0 &&
+                regulations.length === 0 &&
+                opinions.length === 0
+                  ? `No results found across available sources.`
+                  : ""),
             },
           ],
         };
@@ -382,35 +368,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
-      case "search_congress_votes": {
-        const { congress, chamber, limit } = args as {
-          congress?: number;
-          chamber?: "House" | "Senate";
-          limit?: number;
-        };
-        const votes = await usLegalAPI.congress.searchVotes(
-          congress,
-          chamber,
-          limit,
-        );
-
-        return {
-          content: [
-            {
-              type: "text",
-              text:
-                `**Congress Votes**\n\nFound ${votes.length} result(s)\n\n` +
-                votes
-                  .map(
-                    (vote, index) =>
-                      `${index + 1}. **${vote.voteTitle}**\n   ${vote.chamber} - ${vote.voteDate}\n   Result: ${vote.voteResult}\n   ${vote.url}\n`,
-                  )
-                  .join("\n"),
-            },
-          ],
-        };
-      }
-
       case "get_congress_committees": {
         const { congress, chamber } = args as {
           congress?: number;
@@ -516,56 +473,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
-        name: "search_us_code",
-        description: "Search for sections in the US Code (federal statutes)",
-        inputSchema: {
-          type: "object",
-          properties: {
-            query: {
-              type: "string",
-              description: "Search query for US Code sections",
-            },
-            title: {
-              type: "number",
-              description: "Specific title number to search within (optional)",
-            },
-            limit: {
-              type: "number",
-              description: "Number of results to return (max 50)",
-              minimum: 1,
-              maximum: 50,
-              default: 20,
-            },
-          },
-          required: ["query"],
-        },
-      },
-      {
-        name: "search_public_comments",
-        description:
-          "Search for public comments on regulations from Regulations.gov",
-        inputSchema: {
-          type: "object",
-          properties: {
-            query: {
-              type: "string",
-              description: "Search query for public comments",
-            },
-            limit: {
-              type: "number",
-              description: "Number of results to return (max 50)",
-              minimum: 1,
-              maximum: 50,
-              default: 20,
-            },
-          },
-          required: ["query"],
-        },
-      },
-      {
         name: "search_all_legal",
         description:
-          "Comprehensive search across all US legal sources (Congress, Federal Register, US Code, Comments)",
+          "Comprehensive search across all US legal sources (Congress, Federal Register, Court Opinions)",
         inputSchema: {
           type: "object",
           properties: {
@@ -662,33 +572,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description:
                 "Optional court filter (e.g., 'scotus', 'ca1', 'ca2')",
-            },
-            limit: {
-              type: "number",
-              description: "Number of results to return (max 50)",
-              minimum: 1,
-              maximum: 50,
-              default: 20,
-            },
-          },
-        },
-      },
-      {
-        name: "search_congress_votes",
-        description: "Search for voting records in Congress",
-        inputSchema: {
-          type: "object",
-          properties: {
-            congress: {
-              type: "number",
-              description: "Congress number (e.g., 118 for current Congress)",
-              minimum: 100,
-              maximum: 120,
-            },
-            chamber: {
-              type: "string",
-              enum: ["House", "Senate"],
-              description: "Chamber filter (House or Senate)",
             },
             limit: {
               type: "number",

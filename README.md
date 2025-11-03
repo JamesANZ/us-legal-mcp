@@ -1,6 +1,6 @@
 # 🇺🇸 US Legal MCP Server
 
-A comprehensive Model Context Protocol (MCP) server for US legal data, providing access to Congress bills, Federal Register documents, US Code sections, court opinions, voting records, committee data, and public comments on regulations.
+A comprehensive Model Context Protocol (MCP) server for US legal data, providing access to Congress bills, Federal Register documents, court opinions, and committee data.
 
 ## ✨ Features
 
@@ -8,29 +8,14 @@ A comprehensive Model Context Protocol (MCP) server for US legal data, providing
 
 - Search bills and resolutions
 - Get recent legislation
-- Access voting records and member information
+- Get committee information
 - Real-time legislative data
 
 ### 📋 **Federal Register Integration**
 
 - Search regulations and executive orders
 - Get recent agency documents
-- Access public comments
 - Full document text and metadata
-
-### ⚖️ **US Code Integration**
-
-- Search federal statutes
-- Browse by title and section
-- Historical versions
-- Complete legal text
-
-### 💬 **Regulations.gov Integration**
-
-- Search public comments
-- Access rulemaking documents
-- Agency information
-- Public input on regulations
 
 ### ⚖️ **CourtListener Integration**
 
@@ -39,11 +24,10 @@ A comprehensive Model Context Protocol (MCP) server for US legal data, providing
 - Access Supreme Court, appellate, and state court data
 - Full case text and metadata
 
-### 🗳️ **Congress Voting & Committees**
+### 🗳️ **Congress Committees**
 
-- Search voting records
 - Get committee information
-- Access member voting positions
+- Filter by chamber (House/Senate)
 - Legislative activity tracking
 
 ## 🚀 Quick Start
@@ -60,9 +44,6 @@ npm run build
 ```bash
 # For enhanced Congress.gov access (free tier available)
 export CONGRESS_API_KEY="your_congress_api_key"
-
-# For Regulations.gov access
-export REGULATIONS_GOV_API_KEY="your_regulations_gov_api_key"
 
 # For CourtListener API access (free tier available)
 export COURT_LISTENER_API_KEY="your_court_listener_api_key"
@@ -90,7 +71,6 @@ Create or edit `~/.cursor/mcp.json` (or your Cursor MCP config location):
       "args": ["/absolute/path/to/legal-mcp/dist/index.js"],
       "env": {
         "CONGRESS_API_KEY": "",
-        "REGULATIONS_GOV_API_KEY": "",
         "COURT_LISTENER_API_KEY": "258021eb4dd1901f1acfdb3f521fb8a7837a9097"
       }
     }
@@ -112,7 +92,6 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
       "args": ["/absolute/path/to/legal-mcp/dist/index.js"],
       "env": {
         "CONGRESS_API_KEY": "",
-        "REGULATIONS_GOV_API_KEY": "",
         "COURT_LISTENER_API_KEY": "258021eb4dd1901f1acfdb3f521fb8a7837a9097"
       }
     }
@@ -139,24 +118,9 @@ Search Federal Register documents (regulations, executive orders)
 - **Query**: Search terms
 - **Limit**: Number of results (1-50)
 
-### `search-us-code`
+### `search-all-legal`
 
-Search US Code sections (federal statutes)
-
-- **Query**: Search terms
-- **Title**: Optional title number (1-54)
-- **Limit**: Number of results (1-50)
-
-### `search-public-comments`
-
-Search public comments on regulations
-
-- **Query**: Search terms
-- **Limit**: Number of results (1-50)
-
-### `search-us-legal`
-
-Comprehensive search across all sources
+Comprehensive search across all working sources (Congress Bills, Federal Register, Court Opinions)
 
 - **Query**: Search terms
 - **Limit**: Results per source (1-50)
@@ -189,14 +153,6 @@ Get the most recently published court opinions
 - **Court**: Optional court filter
 - **Limit**: Number of results (1-50)
 
-### `search-congress-votes`
-
-Search for voting records in Congress
-
-- **Congress**: Optional Congress number (100-120)
-- **Chamber**: Optional filter ("House" or "Senate")
-- **Limit**: Number of results (1-50)
-
 ### `get-congress-committees`
 
 Get list of Congressional committees
@@ -204,19 +160,15 @@ Get list of Congressional committees
 - **Congress**: Optional Congress number (100-120)
 - **Chamber**: Optional filter ("House" or "Senate")
 
-### `get-legal-sources`
-
-Get information about available data sources
-
 ## 📊 Data Sources
 
-| Source               | Description                        | API                                    | Auth Required |
-| -------------------- | ---------------------------------- | -------------------------------------- | ------------- |
-| **Congress.gov**     | Bills, resolutions, voting records | https://api.congress.gov/v3            | Optional      |
-| **Federal Register** | Regulations, executive orders      | https://www.federalregister.gov/api/v1 | No            |
-| **US Code**          | Federal statutes                   | https://uscode.house.gov/api           | No            |
-| **Regulations.gov**  | Public comments                    | https://api.regulations.gov/v4         | Yes           |
-| **CourtListener**    | Court opinions, decisions          | https://www.courtlistener.com/api/     | Optional      |
+| Source               | Description                    | API                                    | Auth Required | Status |
+| -------------------- | ------------------------------ | -------------------------------------- | ------------- | ------ |
+| **Congress.gov**     | Bills, resolutions, committees | https://api.congress.gov/v3            | Optional      | ✅     |
+| **Federal Register** | Regulations, executive orders  | https://www.federalregister.gov/api/v1 | No            | ✅     |
+| **CourtListener**    | Court opinions, decisions      | https://www.courtlistener.com/api/     | Optional      | ✅     |
+
+**Note:** US Code and Regulations.gov integrations were removed due to persistent API reliability issues.
 
 ## 🔑 API Keys
 
@@ -226,13 +178,6 @@ Get information about available data sources
 2. Sign up for a free account
 3. Get your API key
 4. Set `CONGRESS_API_KEY` environment variable
-
-### Regulations.gov API Key (Optional)
-
-1. Visit [https://api.regulations.gov/](https://api.regulations.gov/)
-2. Sign up for an account
-3. Get your API key
-4. Set `REGULATIONS_GOV_API_KEY` environment variable
 
 ### CourtListener API Key (Optional)
 
@@ -274,10 +219,35 @@ Get information about available data sources
 
 ```json
 {
-  "tool": "search-us-legal",
+  "tool": "search-all-legal",
   "arguments": {
     "query": "healthcare",
     "limit": 20
+  }
+}
+```
+
+### Search Court Opinions
+
+```json
+{
+  "tool": "search-court-opinions",
+  "arguments": {
+    "query": "immigration asylum",
+    "court": "scotus",
+    "limit": 10
+  }
+}
+```
+
+### Get Congressional Committees
+
+```json
+{
+  "tool": "get-congress-committees",
+  "arguments": {
+    "congress": 119,
+    "chamber": "Senate"
   }
 }
 ```
