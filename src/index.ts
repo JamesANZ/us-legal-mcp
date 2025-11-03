@@ -8,11 +8,23 @@ import {
 import USLegalAPI from "./us-legal-apis.js";
 
 // Initialize US Legal API
-const usLegalAPI = new USLegalAPI({
+const apiKeys = {
   congress: process.env.CONGRESS_API_KEY,
   regulationsGov: process.env.REGULATIONS_GOV_API_KEY,
   courtListener: process.env.COURT_LISTENER_API_KEY,
-});
+};
+
+// Log API key status (to stderr for debugging)
+console.error("🔑 API Key Status:");
+console.error(`   Congress.gov: ${apiKeys.congress ? "✅ Set" : "❌ Missing"}`);
+console.error(
+  `   CourtListener: ${apiKeys.courtListener ? "✅ Set" : "❌ Missing"}`,
+);
+console.error(
+  `   Regulations.gov: ${apiKeys.regulationsGov ? "✅ Set" : "❌ Missing"}`,
+);
+
+const usLegalAPI = new USLegalAPI(apiKeys);
 
 // Create MCP server
 const server = new Server(
@@ -39,27 +51,50 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           congress?: number;
           limit?: number;
         };
-        const bills = await usLegalAPI.congress.searchBills(
-          query,
-          congress,
-          limit,
-        );
 
-        return {
-          content: [
-            {
-              type: "text",
-              text:
-                `**Congress Bills Search Results for "${query}"**\n\nFound ${bills.length} result(s)\n\n` +
-                bills
-                  .map(
-                    (bill, index) =>
-                      `${index + 1}. **${bill.title}**\n   ${bill.type} ${bill.number} - ${bill.latestAction?.text || "No status"}\n   ${bill.url}\n`,
-                  )
-                  .join("\n"),
-            },
-          ],
-        };
+        try {
+          const bills = await usLegalAPI.congress.searchBills(
+            query,
+            congress,
+            limit,
+          );
+
+          if (bills.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `**Congress Bills Search Results for "${query}"**\n\nNo bills found matching your search query.\n\n**Troubleshooting:**\n- Try broader search terms\n- Verify Congress.gov API key is set (CONGRESS_API_KEY)\n- Check if search is for a specific Congress session\n- Note: Some topics may have limited federal legislation`,
+                },
+              ],
+            };
+          }
+
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  `**Congress Bills Search Results for "${query}"**\n\nFound ${bills.length} result(s)\n\n` +
+                  bills
+                    .map(
+                      (bill, index) =>
+                        `${index + 1}. **${bill.title}**\n   ${bill.type} ${bill.number} - ${bill.latestAction?.text || "No status"}\n   ${bill.url}\n`,
+                    )
+                    .join("\n"),
+              },
+            ],
+          };
+        } catch (error: any) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `**Error searching Congress bills:** ${error.message || "Unknown error"}\n\n**Possible causes:**\n- Congress.gov API may be unavailable\n- API key may be missing or invalid\n- Rate limiting may be active`,
+              },
+            ],
+          };
+        }
       }
 
       case "search_federal_register": {
@@ -178,23 +213,49 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           congress?: number;
           limit?: number;
         };
-        const bills = await usLegalAPI.congress.getRecentBills(congress, limit);
 
-        return {
-          content: [
-            {
-              type: "text",
-              text:
-                `**Recent Bills in Congress ${congress || 118}**\n\nFound ${bills.length} result(s)\n\n` +
-                bills
-                  .map(
-                    (bill, index) =>
-                      `${index + 1}. **${bill.title}**\n   ${bill.type} ${bill.number} - ${bill.latestAction?.text || "No status"}\n   ${bill.url}\n`,
-                  )
-                  .join("\n"),
-            },
-          ],
-        };
+        try {
+          const bills = await usLegalAPI.congress.getRecentBills(
+            congress,
+            limit,
+          );
+
+          if (bills.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `**Recent Bills in Congress ${congress || 118}**\n\nNo recent bills found.\n\n**Troubleshooting:**\n- Verify Congress.gov API key is set (CONGRESS_API_KEY)\n- Try a different Congress number (e.g., 119 for current)\n- API may be temporarily unavailable`,
+                },
+              ],
+            };
+          }
+
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  `**Recent Bills in Congress ${congress || 118}**\n\nFound ${bills.length} result(s)\n\n` +
+                  bills
+                    .map(
+                      (bill, index) =>
+                        `${index + 1}. **${bill.title}**\n   ${bill.type} ${bill.number} - ${bill.latestAction?.text || "No status"}\n   ${bill.url}\n`,
+                    )
+                    .join("\n"),
+              },
+            ],
+          };
+        } catch (error: any) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `**Error retrieving recent bills:** ${error.message || "Unknown error"}\n\n**Possible causes:**\n- Congress.gov API may be unavailable\n- API key may be missing or invalid`,
+              },
+            ],
+          };
+        }
       }
 
       case "get_recent_regulations": {
@@ -225,27 +286,50 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           court?: string;
           limit?: number;
         };
-        const opinions = await usLegalAPI.courtListener.searchOpinions(
-          query,
-          court,
-          limit,
-        );
 
-        return {
-          content: [
-            {
-              type: "text",
-              text:
-                `**Court Opinions Search Results for "${query}"**\n\nFound ${opinions.length} result(s)\n\n` +
-                opinions
-                  .map(
-                    (opinion, index) =>
-                      `${index + 1}. **${opinion.case_name}**\n   Court: ${opinion.court} - ${opinion.date_filed}\n   ${opinion.precedential_status}\n   ${opinion.url}\n`,
-                  )
-                  .join("\n"),
-            },
-          ],
-        };
+        try {
+          const opinions = await usLegalAPI.courtListener.searchOpinions(
+            query,
+            court,
+            limit,
+          );
+
+          if (opinions.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `**Court Opinions Search Results for "${query}"**\n\nNo court opinions found matching your search.\n\n**Troubleshooting:**\n- Try different search terms or broader keywords\n- Verify CourtListener API key is set (COURT_LISTENER_API_KEY)\n- Try specific court filters (e.g., "scotus" for Supreme Court)\n- Note: Some topics may have limited federal court cases`,
+                },
+              ],
+            };
+          }
+
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  `**Court Opinions Search Results for "${query}"**\n\nFound ${opinions.length} result(s)\n\n` +
+                  opinions
+                    .map(
+                      (opinion, index) =>
+                        `${index + 1}. **${opinion.case_name}**\n   Court: ${opinion.court} - ${opinion.date_filed}\n   ${opinion.precedential_status}\n   ${opinion.url}\n`,
+                    )
+                    .join("\n"),
+              },
+            ],
+          };
+        } catch (error: any) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `**Error searching court opinions:** ${error.message || "Unknown error"}\n\n**Possible causes:**\n- CourtListener API may be unavailable\n- API key may be missing or invalid\n- Rate limiting may be active`,
+              },
+            ],
+          };
+        }
       }
 
       case "get_recent_court_opinions": {
@@ -253,26 +337,49 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           court?: string;
           limit?: number;
         };
-        const opinions = await usLegalAPI.courtListener.getRecentOpinions(
-          court,
-          limit,
-        );
 
-        return {
-          content: [
-            {
-              type: "text",
-              text:
-                `**Recent Court Opinions**\n\nFound ${opinions.length} result(s)\n\n` +
-                opinions
-                  .map(
-                    (opinion, index) =>
-                      `${index + 1}. **${opinion.case_name}**\n   Court: ${opinion.court} - ${opinion.date_filed}\n   ${opinion.precedential_status}\n   ${opinion.url}\n`,
-                  )
-                  .join("\n"),
-            },
-          ],
-        };
+        try {
+          const opinions = await usLegalAPI.courtListener.getRecentOpinions(
+            court,
+            limit,
+          );
+
+          if (opinions.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `**Recent Court Opinions**\n\nNo recent opinions found.\n\n**Troubleshooting:**\n- Verify CourtListener API key is set (COURT_LISTENER_API_KEY)\n- Try without court filter or use different court code\n- API may be temporarily unavailable`,
+                },
+              ],
+            };
+          }
+
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  `**Recent Court Opinions**\n\nFound ${opinions.length} result(s)\n\n` +
+                  opinions
+                    .map(
+                      (opinion, index) =>
+                        `${index + 1}. **${opinion.case_name}**\n   Court: ${opinion.court} - ${opinion.date_filed}\n   ${opinion.precedential_status}\n   ${opinion.url}\n`,
+                    )
+                    .join("\n"),
+              },
+            ],
+          };
+        } catch (error: any) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `**Error retrieving recent court opinions:** ${error.message || "Unknown error"}\n\n**Possible causes:**\n- CourtListener API may be unavailable\n- API key may be missing or invalid`,
+              },
+            ],
+          };
+        }
       }
 
       case "search_congress_votes": {
