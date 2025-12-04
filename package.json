@@ -6,7 +6,8 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "postinstall": "node scripts/postinstall.js"
+    "postinstall": "node scripts/postinstall.js",
+    "generate-cursor-link": "node scripts/generate-cursor-install-link.js"
   },
   "keywords": [
     "mcp",

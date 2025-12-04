@@ -34,6 +34,18 @@ A comprehensive Model Context Protocol (MCP) server for US legal data, providing
 
 ### Installation
 
+#### Installing in Cursor
+
+You can install this MCP server directly in Cursor using the one-click install link:
+
+**🔗 [Install in Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=legal-mcp&config=eyJsZWdhbC1tY3AiOnsiY29tbWFuZCI6Im5weCIsImFyZ3MiOlsiLXkiLCJ1cy1sZWdhbC1tY3AiXX19)**
+
+This will automatically configure the MCP server using `npx`. No API keys are required (optional API keys available for enhanced access).
+
+**Generate a new install link:** Run `npm run generate-cursor-link` to generate a fresh install link with the latest configuration.
+
+#### Install from Source
+
 ```bash
 npm install
 npm run build
