@@ -40,6 +40,10 @@ You can install this MCP server directly in Cursor using the one-click install l
 
 **🔗 [Install in Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=legal-mcp&config=eyJsZWdhbC1tY3AiOnsiY29tbWFuZCI6Im5weCIsImFyZ3MiOlsiLXkiLCJ1cy1sZWdhbC1tY3AiXX19)**
 
+```
+cursor://anysphere.cursor-deeplink/mcp/install?name=legal-mcp&config=eyJsZWdhbC1tY3AiOnsiY29tbWFuZCI6Im5weCIsImFyZ3MiOlsiLXkiLCJ1cy1sZWdhbC1tY3AiXX19
+```
+
 This will automatically configure the MCP server using `npx`. No API keys are required (optional API keys available for enhanced access).
 
 #### Install from Source
