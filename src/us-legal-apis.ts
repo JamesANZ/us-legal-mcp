@@ -2,6 +2,38 @@
 // Comprehensive integration with US government legal data sources
 
 import axios from "axios";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fetchFeed, filterAndRank, FeedItem } from "./rss.js";
+
+const execFileAsync = promisify(execFile);
+
+// Some federal sites (notably cftc.gov) sit behind Cloudflare and reject
+// Node's TLS fingerprint regardless of User-Agent. curl, however, is almost
+// universally available and works. This helper shells out to curl and returns
+// the response body as a string; throws on non-2xx.
+async function fetchViaCurl(url: string, userAgent?: string): Promise<string> {
+  const ua =
+    userAgent ||
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15";
+  const { stdout } = await execFileAsync(
+    "curl",
+    [
+      "-s",
+      "-L",
+      "--max-time",
+      "20",
+      "-A",
+      ua,
+      "-H",
+      "Accept: application/rss+xml, application/atom+xml, application/xml, text/xml, text/html, */*",
+      "--fail-with-body",
+      url,
+    ],
+    { maxBuffer: 10 * 1024 * 1024 },
+  );
+  return stdout;
+}
 
 // Relevance scoring utilities
 function calculateRelevanceScore(text: string, query: string): number {
@@ -123,7 +155,19 @@ export const API_ENDPOINTS = {
   US_CODE: "https://uscode.house.gov/api",
   REGULATIONS_GOV: "https://api.regulations.gov/v4",
   GPO: "https://api.govinfo.gov",
+  GOVINFO: "https://api.govinfo.gov",
   COURT_LISTENER: "https://www.courtlistener.com/api/rest/v3",
+  OCC_API: "https://api.occ.gov",
+  OCC_RSS: "https://www.occ.gov/rss",
+  SEC_PRESS_RSS:
+    "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=&company=&dateb=&owner=include&count=40&output=atom",
+  SEC_PRESS_NEWS_RSS: "https://www.sec.gov/news/pressreleases.rss",
+  CFTC_RSS_GENERAL: "https://www.cftc.gov/RSS/RSSGP/rssgp.xml",
+  CFTC_RSS_ENFORCEMENT: "https://www.cftc.gov/RSS/RSSENF/rssenf.xml",
+  CFTC_RSS_SPEECHES: "https://www.cftc.gov/RSS/RSSST/rssst.xml",
+  FED_PRESS_ALL_RSS: "https://www.federalreserve.gov/feeds/press_all.xml",
+  TREASURY_PRESS_RSS: "https://home.treasury.gov/rss/press",
+  FINCEN_NEWS_RSS: "https://www.fincen.gov/news/news-releases/feed",
 } as const;
 
 // Types for US Legal Data
@@ -248,6 +292,87 @@ export interface Committee {
   }>;
 }
 
+export interface BillAction {
+  actionDate: string;
+  actionTime?: string;
+  text: string;
+  type?: string;
+  actionCode?: string;
+  sourceSystem?: {
+    code?: number;
+    name?: string;
+  };
+  committees?: Array<{
+    name: string;
+    systemCode?: string;
+    url?: string;
+  }>;
+  recordedVotes?: Array<{
+    chamber?: string;
+    congress?: number;
+    date?: string;
+    rollNumber?: number;
+    sessionNumber?: number;
+    url?: string;
+  }>;
+}
+
+export interface BillTextVersion {
+  type: string; // e.g. "Enrolled Bill", "Engrossed in House", "Introduced in Senate"
+  date?: string;
+  formats: Array<{
+    type: string; // "Formatted Text" | "PDF" | "Formatted XML"
+    url: string;
+  }>;
+}
+
+export interface PublicLawPackage {
+  packageId: string;
+  title: string;
+  publicLawNumber?: string;
+  congress?: number;
+  dateIssued?: string;
+  docClass?: string;
+  category?: string;
+  branch?: string;
+  pages?: number;
+  summaryUrl: string;
+  htmlUrl?: string;
+  pdfUrl?: string;
+  xmlUrl?: string;
+  txtUrl?: string;
+  abstract?: string;
+}
+
+export interface RegulatorNewsItem {
+  source: string; // "occ" | "sec" | "cftc" | "fed" | "treasury"
+  title: string;
+  link: string;
+  date?: string;
+  summary?: string;
+  category?: string;
+}
+
+// Parse a canonical bill id like "s1582-119" or "hr3633-119" into its parts.
+// Also accepts uppercase variants and bill types like "sres", "hres", "sjres", "hjres", "sconres", "hconres".
+export function parseBillId(billId: string): {
+  congress: number;
+  type: string;
+  number: number;
+} | null {
+  if (!billId) return null;
+  const m = billId
+    .trim()
+    .toLowerCase()
+    .match(/^(hr|s|hres|sres|hjres|sjres|hconres|sconres)(\d+)-(\d{2,3})$/);
+  if (!m) return null;
+  return {
+    type: m[1],
+    number: parseInt(m[2], 10),
+    congress: parseInt(m[3], 10),
+  };
+}
+
 // Congress.gov API Functions
 export class CongressAPI {
   private apiKey: string;
@@ -260,22 +385,35 @@ export class CongressAPI {
     query: string,
     congress?: number,
     limit: number = 20,
+    options?: { strict?: boolean; minScore?: number },
   ): Promise<CongressBill[]> {
     try {
-      // Get more results than needed for filtering (increased for better relevance)
-      const fetchLimit = Math.min(limit * 5, 250);
+      // Get more results than needed for filtering.
+      // In strict mode we pull a larger window because the /bill endpoint
+      // silently ignores the `q` param - we have to filter client-side.
+      const strict = options?.strict === true;
+      const minScore = options?.minScore ?? (strict ? 8 : 5);
+      const fetchLimit = Math.min(limit * (strict ? 12 : 5), 250);
+
+      // Default to the current Congress when strict: keyword-less listings
+      // from earlier Congresses are almost always noise for current-policy
+      // queries (e.g. stablecoin / digital asset).
+      const effectiveCongress = congress ?? (strict ? 119 : undefined);
 
       const params = new URLSearchParams({
         q: query,
         limit: fetchLimit.toString(),
         format: "json",
+        sort: "updateDate+desc",
         ...(this.apiKey && { api_key: this.apiKey }),
-        ...(congress && { congress: congress.toString() }),
+        ...(effectiveCongress && { congress: effectiveCongress.toString() }),
       });
 
-      const response = await axios.get(
-        `${API_ENDPOINTS.CONGRESS}/bill?${params}`,
-      );
+      const baseUrl = effectiveCongress
+        ? `${API_ENDPOINTS.CONGRESS}/bill/${effectiveCongress}`
+        : `${API_ENDPOINTS.CONGRESS}/bill`;
+
+      const response = await axios.get(`${baseUrl}?${params}`);
 
       const bills = (response.data.bills || []).map((bill: any) => ({
         congress: bill.congress,
@@ -327,8 +465,16 @@ export class CongressAPI {
       // Use smart filtering: prioritize high-scoring bills but always return top results
       // Only filter if we have many high-scoring options
       const highRelevanceBills = scoredBills.filter(
-        (bill: any) => bill.relevanceScore >= 5,
+        (bill: any) => bill.relevanceScore >= minScore,
       );
+
+      if (strict) {
+        // Strict mode: never pad with low-score noise. Return only bills
+        // that actually matched the query (or an empty array).
+        return highRelevanceBills
+          .slice(0, limit)
+          .map(({ relevanceScore, ...bill }: any) => bill);
+      }
 
       if (highRelevanceBills.length >= limit) {
         // We have enough high-relevance results, return those
@@ -366,6 +512,26 @@ export class CongressAPI {
       );
 
       const bill = response.data.bill;
+      // NOTE: The single-bill endpoint returns `subjects` as
+      // `{count, url, policyArea, legislativeSubjects?}` rather than the
+      // array you get from /bill?... So we normalize both shapes here.
+      let subjects: string[] | undefined;
+      if (Array.isArray(bill.subjects)) {
+        subjects = bill.subjects
+          .map((s: any) => (typeof s === "string" ? s : s?.name))
+          .filter(Boolean);
+      } else if (bill.subjects && typeof bill.subjects === "object") {
+        const collected: string[] = [];
+        if (bill.subjects.policyArea?.name) {
+          collected.push(bill.subjects.policyArea.name);
+        }
+        if (Array.isArray(bill.subjects.legislativeSubjects)) {
+          for (const s of bill.subjects.legislativeSubjects) {
+            if (s?.name) collected.push(s.name);
+          }
+        }
+        subjects = collected.length ? collected : undefined;
+      }
       return {
         congress: bill.congress,
         type: bill.type,
@@ -381,7 +547,7 @@ export class CongressAPI {
               text: bill.latestAction.text,
             }
           : undefined,
-        subjects: bill.subjects?.map((s: any) => s.name),
+        subjects,
         sponsors: bill.sponsors?.map((s: any) => ({
           bioguideId: s.bioguideId,
           firstName: s.firstName,
@@ -498,6 +664,115 @@ export class CongressAPI {
     }
   }
 
+  // Raw bill details (includes sponsors, cosponsors, actions ref, subjects, etc.).
+  // Returns the raw API payload for maximum fidelity; the caller can project what it needs.
+  async getBill(
+    congress: number,
+    type: string,
+    number: number,
+  ): Promise<any | null> {
+    try {
+      const params = new URLSearchParams({
+        format: "json",
+        ...(this.apiKey && { api_key: this.apiKey }),
+      });
+      const billType = type.toLowerCase();
+      const response = await axios.get(
+        `${API_ENDPOINTS.CONGRESS}/bill/${congress}/${billType}/${number}?${params}`,
+      );
+      return response.data?.bill ?? null;
+    } catch (error: any) {
+      console.error("Congress API getBill error:", error.message || error);
+      return null;
+    }
+  }
+
+  async getBillActions(
+    congress: number,
+    type: string,
+    number: number,
+    limit: number = 50,
+  ): Promise<BillAction[]> {
+    try {
+      const params = new URLSearchParams({
+        format: "json",
+        limit: Math.min(limit, 250).toString(),
+        ...(this.apiKey && { api_key: this.apiKey }),
+      });
+      const billType = type.toLowerCase();
+      const response = await axios.get(
+        `${API_ENDPOINTS.CONGRESS}/bill/${congress}/${billType}/${number}/actions?${params}`,
+      );
+      const actions: BillAction[] = (response.data?.actions || []).map(
+        (a: any) => ({
+          actionDate: a.actionDate,
+          actionTime: a.actionTime,
+          text: a.text,
+          type: a.type,
+          actionCode: a.actionCode,
+          sourceSystem: a.sourceSystem
+            ? { code: a.sourceSystem.code, name: a.sourceSystem.name }
+            : undefined,
+          committees: a.committees?.map((c: any) => ({
+            name: c.name,
+            systemCode: c.systemCode,
+            url: c.url,
+          })),
+          recordedVotes: a.recordedVotes?.map((v: any) => ({
+            chamber: v.chamber,
+            congress: v.congress,
+            date: v.date,
+            rollNumber: v.rollNumber,
+            sessionNumber: v.sessionNumber,
+            url: v.url,
+          })),
+        }),
+      );
+      // Sort newest first (API is usually newest-first already but guarantee it)
+      actions.sort((a, b) =>
+        (b.actionDate || "").localeCompare(a.actionDate || ""),
+      );
+      return actions;
+    } catch (error: any) {
+      console.error(
+        "Congress API getBillActions error:",
+        error.message || error,
+      );
+      return [];
+    }
+  }
+
+  async getBillTextVersions(
+    congress: number,
+    type: string,
+    number: number,
+  ): Promise<BillTextVersion[]> {
+    try {
+      const params = new URLSearchParams({
+        format: "json",
+        ...(this.apiKey && { api_key: this.apiKey }),
+      });
+      const billType = type.toLowerCase();
+      const response = await axios.get(
+        `${API_ENDPOINTS.CONGRESS}/bill/${congress}/${billType}/${number}/text?${params}`,
+      );
+      return (response.data?.textVersions || []).map((v: any) => ({
+        type: v.type,
+        date: v.date,
+        formats: (v.formats || []).map((f: any) => ({
+          type: f.type,
+          url: f.url,
+        })),
+      }));
+    } catch (error: any) {
+      console.error(
+        "Congress API getBillTextVersions error:",
+        error.message || error,
+      );
+      return [];
+    }
+  }
+
   async getCommittees(
     congress?: number,
     chamber?: "House" | "Senate",
@@ -541,6 +816,142 @@ export class CongressAPI {
   }
 }
 
+// GovInfo API Functions (api.govinfo.gov)
+// Docs: https://api.govinfo.gov/docs/
+// Requires an api.data.gov key (free). Falls back to DEMO_KEY (rate-limited) when none provided.
+export class GovInfoAPI {
+  private apiKey: string;
+
+  constructor(apiKey?: string) {
+    this.apiKey = apiKey || process.env.GOVINFO_API_KEY || "DEMO_KEY";
+  }
+
+  private keyParams(): URLSearchParams {
+    return new URLSearchParams({ api_key: this.apiKey });
+  }
+
+  // Public Law package id shape: PLAW-{congress}publ{lawNumber}
+  // Example: GENIUS Act (Pub. L. 119-27) = PLAW-119publ27
+  buildPublicLawPackageId(congress: number, lawNumber: number): string {
+    return `PLAW-${congress}publ${lawNumber}`;
+  }
+
+  // Bill package id shape: BILLS-{congress}{type}{number}{stage}
+  // stage examples: ih (introduced house), is (introduced senate), rh (reported house),
+  //                 eh (engrossed house), es (engrossed senate), enr (enrolled),
+  //                 rfs (referred to senate), pcs (placed on calendar senate), etc.
+  buildBillPackageId(
+    congress: number,
+    type: string,
+    number: number,
+    stage: string = "enr",
+  ): string {
+    return `BILLS-${congress}${type.toLowerCase()}${number}${stage.toLowerCase()}`;
+  }
+
+  async getPackageSummary(packageId: string): Promise<PublicLawPackage | null> {
+    try {
+      const response = await axios.get(
+        `${API_ENDPOINTS.GOVINFO}/packages/${packageId}/summary?${this.keyParams()}`,
+        { timeout: 20000 },
+      );
+      const d = response.data || {};
+      const download = d.download || {};
+      return {
+        packageId: d.packageId || packageId,
+        title: d.title || "",
+        publicLawNumber: d.publicLawNumber,
+        congress: d.congress ? parseInt(d.congress, 10) : undefined,
+        dateIssued: d.dateIssued,
+        docClass: d.docClass,
+        category: d.category,
+        branch: d.branch,
+        pages: d.pages,
+        summaryUrl: `${API_ENDPOINTS.GOVINFO}/packages/${packageId}/summary`,
+        htmlUrl: download.htmLink || download.txtLink,
+        pdfUrl: download.pdfLink,
+        xmlUrl: download.xmlLink || download.uslmLink,
+        txtUrl: download.txtLink,
+        abstract: d.abstract,
+      };
+    } catch (error: any) {
+      if (error.response?.status === 429) {
+        console.error(
+          "GovInfo API: rate-limited. Set GOVINFO_API_KEY to your api.data.gov key for higher limits.",
+        );
+      } else if (error.response?.status === 404) {
+        console.error(`GovInfo API: package not found: ${packageId}`);
+      } else {
+        console.error(
+          "GovInfo API error:",
+          error.response?.status,
+          error.message || error,
+        );
+      }
+      return null;
+    }
+  }
+
+  // Fetch the plain-text content of a package (HTM -> text).
+  // Returns truncated text so we don't explode MCP responses. Caller can raise `maxChars`.
+  async getPackageText(
+    packageId: string,
+    maxChars: number = 20000,
+  ): Promise<string | null> {
+    try {
+      // Try htm first, fall back to txt
+      for (const fmt of ["htm", "txt"] as const) {
+        try {
+          const response = await axios.get(
+            `${API_ENDPOINTS.GOVINFO}/packages/${packageId}/${fmt}?${this.keyParams()}`,
+            {
+              timeout: 30000,
+              responseType: "text",
+              transformResponse: (data) => data, // keep raw
+            },
+          );
+          let text: string = response.data || "";
+          if (fmt === "htm") {
+            text = text
+              .replace(/<script[\s\S]*?<\/script>/gi, "")
+              .replace(/<style[\s\S]*?<\/style>/gi, "")
+              .replace(/<[^>]+>/g, " ")
+              .replace(/&nbsp;/g, " ")
+              .replace(/&amp;/g, "&")
+              .replace(/&lt;/g, "<")
+              .replace(/&gt;/g, ">")
+              .replace(/&quot;/g, '"')
+              .replace(/\s+/g, " ")
+              .trim();
+          }
+          if (!text) continue;
+          if (text.length > maxChars) {
+            text = text.substring(0, maxChars) + "\n\n...[truncated]";
+          }
+          return text;
+        } catch {
+          // try next format
+        }
+      }
+      return null;
+    } catch (error: any) {
+      console.error(
+        "GovInfo API getPackageText error:",
+        error.message || error,
+      );
+      return null;
+    }
+  }
+
+  async getPublicLaw(
+    congress: number,
+    lawNumber: number,
+  ): Promise<PublicLawPackage | null> {
+    const packageId = this.buildPublicLawPackageId(congress, lawNumber);
+    return this.getPackageSummary(packageId);
+  }
+}
+
 // Federal Register API Functions
 export class FederalRegisterAPI {
   async searchDocuments(
@@ -551,8 +962,12 @@ export class FederalRegisterAPI {
       // Get more results than needed for filtering
       const fetchLimit = Math.min(limit * 3, 100);
 
+      // Federal Register has two search modes:
+      //   q=...                  → fuzzy relevance-ranked (noisy)
+      //   conditions[term]=...   → proper keyword search over title + full text
+      // The conditions[term] form is strictly better for our use case.
       const params = new URLSearchParams({
-        q: query,
+        "conditions[term]": query,
         per_page: fetchLimit.toString(),
         order: "relevance",
       });
@@ -992,6 +1407,314 @@ export class RegulationsGovAPI {
   }
 }
 
+// ------------------------------------------------------------------
+// Regulator news clients (OCC, SEC, CFTC, Federal Reserve, Treasury/FinCEN)
+// ------------------------------------------------------------------
+
+export type RegulatorSource =
+  | "occ"
+  | "sec"
+  | "cftc"
+  | "fed"
+  | "treasury"
+  | "fincen";
+
+export class OCCAPI {
+  // OCC publishes an RSS feed of news releases (and related items).
+  private feedUrl = `${API_ENDPOINTS.OCC_RSS}/occ_news.xml`;
+
+  async getRecentNews(limit: number = 20): Promise<RegulatorNewsItem[]> {
+    try {
+      const items = await fetchFeed(this.feedUrl);
+      return items.slice(0, limit).map((i) => toRegulatorItem(i, "occ"));
+    } catch (error: any) {
+      console.error("OCC RSS error:", error.message || error);
+      return [];
+    }
+  }
+
+  async searchNews(
+    query: string,
+    limit: number = 20,
+  ): Promise<RegulatorNewsItem[]> {
+    try {
+      const items = await fetchFeed(this.feedUrl);
+      return filterAndRank(items, query, limit).map((i) =>
+        toRegulatorItem(i, "occ"),
+      );
+    } catch (error: any) {
+      console.error("OCC RSS error:", error.message || error);
+      return [];
+    }
+  }
+}
+
+export class SECAPI {
+  // SEC press releases RSS.
+  private feedUrl = API_ENDPOINTS.SEC_PRESS_NEWS_RSS;
+
+  async getRecentNews(limit: number = 20): Promise<RegulatorNewsItem[]> {
+    try {
+      const items = await fetchFeed(this.feedUrl);
+      return items.slice(0, limit).map((i) => toRegulatorItem(i, "sec"));
+    } catch (error: any) {
+      console.error("SEC RSS error:", error.message || error);
+      return [];
+    }
+  }
+
+  async searchNews(
+    query: string,
+    limit: number = 20,
+  ): Promise<RegulatorNewsItem[]> {
+    try {
+      const items = await fetchFeed(this.feedUrl);
+      return filterAndRank(items, query, limit).map((i) =>
+        toRegulatorItem(i, "sec"),
+      );
+    } catch (error: any) {
+      console.error("SEC RSS error:", error.message || error);
+      return [];
+    }
+  }
+}
+
+export class CFTCAPI {
+  // CFTC's RSS feeds are served behind Cloudflare and reject Node/axios clients
+  // even with browser-like User-Agents (JA3 fingerprint challenge). We scrape
+  // the HTML press release listing page instead, which reliably returns a table
+  // of (release number -> title) anchors plus embedded <time> date elements.
+  private listingUrl = "https://www.cftc.gov/PressRoom/PressReleases";
+
+  async getRecentNews(limit: number = 20): Promise<RegulatorNewsItem[]> {
+    return scrapeListing(
+      this.listingUrl,
+      "/PressRoom/PressReleases/",
+      "cftc",
+      limit,
+    );
+  }
+
+  async searchNews(
+    query: string,
+    limit: number = 20,
+  ): Promise<RegulatorNewsItem[]> {
+    const all = await scrapeListing(
+      this.listingUrl,
+      "/PressRoom/PressReleases/",
+      "cftc",
+      Math.max(limit * 5, 40),
+    );
+    const feedItems: FeedItem[] = all.map((r) => ({
+      title: r.title,
+      link: r.link,
+      date: r.date,
+      summary: r.summary,
+    }));
+    const ranked = filterAndRank(feedItems, query, limit);
+    const byLink = new Map(all.map((r) => [r.link, r] as const));
+    return ranked
+      .map((i) => byLink.get(i.link))
+      .filter((x): x is RegulatorNewsItem => !!x);
+  }
+}
+
+export class FederalReserveAPI {
+  private feedUrl = API_ENDPOINTS.FED_PRESS_ALL_RSS;
+
+  async getRecentNews(limit: number = 20): Promise<RegulatorNewsItem[]> {
+    try {
+      const items = await fetchFeed(this.feedUrl);
+      return items.slice(0, limit).map((i) => toRegulatorItem(i, "fed"));
+    } catch (error: any) {
+      console.error("Federal Reserve RSS error:", error.message || error);
+      return [];
+    }
+  }
+
+  async searchNews(
+    query: string,
+    limit: number = 20,
+  ): Promise<RegulatorNewsItem[]> {
+    try {
+      const items = await fetchFeed(this.feedUrl);
+      return filterAndRank(items, query, limit).map((i) =>
+        toRegulatorItem(i, "fed"),
+      );
+    } catch (error: any) {
+      console.error("Federal Reserve RSS error:", error.message || error);
+      return [];
+    }
+  }
+}
+
+// Treasury and FinCEN do not publish reliable RSS/Atom feeds, so we scrape
+// their public press-releases listing pages. The extraction is deliberately
+// conservative: (URL, anchor-text) pairs from within news release URL paths.
+async function fetchHtml(url: string): Promise<string> {
+  try {
+    const response = await axios.get(url, {
+      headers: {
+        // home.treasury.gov and others refuse non-browser UAs; send a realistic one.
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15",
+        Accept: "text/html,application/xhtml+xml",
+      },
+      timeout: 20000,
+      responseType: "text",
+      transformResponse: (d) => d,
+      validateStatus: (s) => s < 500,
+    });
+    if (response.status >= 400) {
+      // Cloudflare-fronted sites (CFTC) reject Node TLS fingerprints; fall back to curl.
+      return await fetchViaCurl(url);
+    }
+    return response.data || "";
+  } catch (err: any) {
+    // Network-level error; still try curl once.
+    try {
+      return await fetchViaCurl(url);
+    } catch {
+      throw err;
+    }
+  }
+}
+
+async function scrapeListing(
+  url: string,
+  pathPrefix: string,
+  source: RegulatorSource,
+  limit: number,
+): Promise<RegulatorNewsItem[]> {
+  try {
+    const html = await fetchHtml(url);
+    if (!html) return [];
+    const pattern = new RegExp(
+      `<a[^>]+href=\"(${pathPrefix.replace(/\//g, "\\/")}[^\"#]+)\"[^>]*>([\\s\\S]*?)<\\/a>`,
+      "g",
+    );
+    const base = new URL(url).origin;
+    const items: RegulatorNewsItem[] = [];
+    const seen = new Set<string>();
+    let m: RegExpExecArray | null;
+    while ((m = pattern.exec(html)) !== null) {
+      const href = m[1];
+      const rawTitle = m[2]
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!rawTitle || rawTitle.length < 6) continue;
+      // Skip hub/section links
+      if (
+        /^(press-releases|readouts|statements-remarks|testimonies)$/i.test(
+          href.split("/").pop() || "",
+        )
+      ) {
+        continue;
+      }
+      if (seen.has(href)) continue;
+      seen.add(href);
+      items.push({
+        source,
+        title: rawTitle,
+        link: href.startsWith("http") ? href : `${base}${href}`,
+      });
+      if (items.length >= limit * 2) break; // small buffer
+    }
+    return items.slice(0, limit);
+  } catch (error: any) {
+    console.error(`${source} scrape error:`, error.message || error);
+    return [];
+  }
+}
+
+export class TreasuryAPI {
+  private listingUrl = "https://home.treasury.gov/news/press-releases";
+
+  async getRecentNews(limit: number = 20): Promise<RegulatorNewsItem[]> {
+    return scrapeListing(
+      this.listingUrl,
+      "/news/press-releases/",
+      "treasury",
+      limit,
+    );
+  }
+
+  async searchNews(
+    query: string,
+    limit: number = 20,
+  ): Promise<RegulatorNewsItem[]> {
+    // Pull a larger slice and filter client-side.
+    const all = await scrapeListing(
+      this.listingUrl,
+      "/news/press-releases/",
+      "treasury",
+      Math.max(limit * 5, 40),
+    );
+    const feedItems: FeedItem[] = all.map((r) => ({
+      title: r.title,
+      link: r.link,
+      date: r.date,
+      summary: r.summary,
+    }));
+    const ranked = filterAndRank(feedItems, query, limit);
+    const byLink = new Map(all.map((r) => [r.link, r] as const));
+    return ranked
+      .map((i) => byLink.get(i.link))
+      .filter((x): x is RegulatorNewsItem => !!x);
+  }
+}
+
+export class FinCENAPI {
+  private listingUrl = "https://www.fincen.gov/news/press-releases";
+
+  async getRecentNews(limit: number = 20): Promise<RegulatorNewsItem[]> {
+    return scrapeListing(
+      this.listingUrl,
+      "/news/news-releases/",
+      "fincen",
+      limit,
+    );
+  }
+
+  async searchNews(
+    query: string,
+    limit: number = 20,
+  ): Promise<RegulatorNewsItem[]> {
+    const all = await scrapeListing(
+      this.listingUrl,
+      "/news/news-releases/",
+      "fincen",
+      Math.max(limit * 5, 40),
+    );
+    const feedItems: FeedItem[] = all.map((r) => ({
+      title: r.title,
+      link: r.link,
+      date: r.date,
+      summary: r.summary,
+    }));
+    const ranked = filterAndRank(feedItems, query, limit);
+    const byLink = new Map(all.map((r) => [r.link, r] as const));
+    return ranked
+      .map((i) => byLink.get(i.link))
+      .filter((x): x is RegulatorNewsItem => !!x);
+  }
+}
+
+function toRegulatorItem(
+  item: FeedItem,
+  source: RegulatorSource,
+): RegulatorNewsItem {
+  return {
+    source,
+    title: item.title,
+    link: item.link,
+    date: item.date,
+    summary: item.summary,
+    category: item.category,
+  };
+}
+
 // Main US Legal API Class
 export class USLegalAPI {
   public congress: CongressAPI;
@@ -999,17 +1722,102 @@ export class USLegalAPI {
   public usCode: USCodeAPI;
   public regulations: RegulationsGovAPI;
   public courtListener: CourtListenerAPI;
+  public govInfo: GovInfoAPI;
+  public occ: OCCAPI;
+  public sec: SECAPI;
+  public cftc: CFTCAPI;
+  public fed: FederalReserveAPI;
+  public treasury: TreasuryAPI;
+  public fincen: FinCENAPI;
 
   constructor(apiKeys?: {
     congress?: string;
     regulationsGov?: string;
     courtListener?: string;
+    govInfo?: string;
   }) {
     this.congress = new CongressAPI(apiKeys?.congress);
     this.federalRegister = new FederalRegisterAPI();
     this.usCode = new USCodeAPI();
     this.regulations = new RegulationsGovAPI(apiKeys?.regulationsGov);
     this.courtListener = new CourtListenerAPI(apiKeys?.courtListener);
+    this.govInfo = new GovInfoAPI(apiKeys?.govInfo);
+    this.occ = new OCCAPI();
+    this.sec = new SECAPI();
+    this.cftc = new CFTCAPI();
+    this.fed = new FederalReserveAPI();
+    this.treasury = new TreasuryAPI();
+    this.fincen = new FinCENAPI();
+  }
+
+  getRegulator(source: RegulatorSource) {
+    switch (source) {
+      case "occ":
+        return this.occ;
+      case "sec":
+        return this.sec;
+      case "cftc":
+        return this.cftc;
+      case "fed":
+        return this.fed;
+      case "treasury":
+        return this.treasury;
+      case "fincen":
+        return this.fincen;
+    }
+  }
+
+  async getRecentRegulatorNews(
+    source: RegulatorSource | "all",
+    limit: number = 20,
+  ): Promise<RegulatorNewsItem[]> {
+    if (source === "all") {
+      const sources: RegulatorSource[] = [
+        "occ",
+        "sec",
+        "cftc",
+        "fed",
+        "treasury",
+        "fincen",
+      ];
+      const per = Math.max(1, Math.ceil(limit / sources.length));
+      const results = await Promise.all(
+        sources.map((s) => this.getRegulator(s).getRecentNews(per)),
+      );
+      const flat = results.flat();
+      flat.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+      return flat.slice(0, limit);
+    }
+    return this.getRegulator(source).getRecentNews(limit);
+  }
+
+  async searchRegulatorNews(
+    query: string,
+    source: RegulatorSource | "all",
+    limit: number = 20,
+  ): Promise<RegulatorNewsItem[]> {
+    if (source === "all") {
+      const sources: RegulatorSource[] = [
+        "occ",
+        "sec",
+        "cftc",
+        "fed",
+        "treasury",
+        "fincen",
+      ];
+      const per = Math.max(1, Math.ceil(limit / sources.length));
+      const results = await Promise.all(
+        sources.map((s) =>
+          this.getRegulator(s)
+            .searchNews(query, per)
+            .catch(() => [] as RegulatorNewsItem[]),
+        ),
+      );
+      const flat = results.flat();
+      flat.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+      return flat.slice(0, limit);
+    }
+    return this.getRegulator(source).searchNews(query, limit);
   }
 
   // Comprehensive search across all sources
