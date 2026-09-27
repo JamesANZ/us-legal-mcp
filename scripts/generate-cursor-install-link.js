@@ -24,4 +24,6 @@ console.log("\n🔗 Cursor MCP Install Link:\n");
 console.log(deeplink);
 console.log("\n📋 Configuration:\n");
 console.log(JSON.stringify(config, null, 2));
-console.log("\n💡 Note: This MCP server does not require any API keys.\n");
+console.log(
+  "\n💡 Note: API keys are optional. Add TYPESAFE_API_KEY (or JEV_API_KEY) in MCP env to enable Jev high-confidence filtering.\n",
+);

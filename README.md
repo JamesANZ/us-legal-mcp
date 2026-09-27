@@ -7,6 +7,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that b
 ## Why Use US Legal MCP?
 
 - 🆓 **No API Keys Required** – Works out of the box (optional keys for enhanced access)
+- 🎯 **Jev High-Confidence Filter** – Optional TypeSafe Jev scoring drops poor matches
 - 📜 **Comprehensive Sources** – Congress, Federal Register, CourtListener
 - ⚡ **Easy Setup** – One-click install in Cursor or simple manual setup
 - 🔍 **Multi-Source Search** – Search across all legal sources simultaneously
@@ -46,6 +47,12 @@ cd legal-mcp && npm install && npm run build
 
 - **`search-court-opinions`** – Search court opinions (federal and state)
 - **`get-recent-court-opinions`** – Get recent court decisions
+
+### 🎯 Jev Relevance Filter (optional)
+
+When `TYPESAFE_API_KEY` (or `JEV_API_KEY`) is set in the MCP server env, query-based search tools send each hit to [Jev](https://docs.typesafe.ai) (TypeSafe System One) and **only return high-confidence matches**. Poor or low-confidence results are dropped. Without a key the server keeps its existing keyword scoring.
+
+Filtered tools: `search_congress_bills`, `search_federal_register`, `search_all_legal`, `search_court_opinions`, `search_regulator_news`, `search_digital_asset_regulation`. Lookup tools (`get_bill_details`, recent lists, curated acts) are unchanged.
 
 ### 🔍 Multi-Source
 
@@ -108,7 +115,8 @@ Add to `claude_desktop_config.json`:
       "env": {
         "CONGRESS_API_KEY": "",
         "COURT_LISTENER_API_KEY": "",
-        "GOVINFO_API_KEY": ""
+        "GOVINFO_API_KEY": "",
+        "TYPESAFE_API_KEY": ""
       }
     }
   }
@@ -116,6 +124,8 @@ Add to `claude_desktop_config.json`:
 ```
 
 Restart Claude Desktop after configuration.
+
+In Cursor, the same optional `TYPESAFE_API_KEY` (or `JEV_API_KEY`) can be added under **Settings → MCP → us-legal-mcp → env**. Leave it blank to keep keyword-only ranking.
 
 ## Usage Examples
 
@@ -213,6 +223,19 @@ Find court decisions:
 1. Visit [https://api.data.gov/signup/](https://api.data.gov/signup/) to request a free key
 2. Set `GOVINFO_API_KEY` environment variable. Without it the server falls back to `DEMO_KEY` (rate-limited).
 
+### Jev / TypeSafe API Key (optional)
+
+Used to check whether each search hit actually matches the user's request. **The server runs without this key.** Add it in your MCP config `env` if you want high-confidence filtering.
+
+1. Create a key in the [TypeSafe console](https://typesafe.ai) (or use a compatible gateway)
+2. Set `TYPESAFE_API_KEY` in the MCP server env (alias: `JEV_API_KEY`)
+3. Optional overrides:
+   - `JEV_MIN_RELEVANCE` – keep threshold, `0`–`1` (default `0.85`)
+   - `JEV_MODEL` – default `jev-latest`
+   - `TYPESAFE_BASE_URL` – default `https://api.typesafe.ai`
+
+When the filter is on, search results include a Jev score (e.g. `Jev 0.94`) and a short note of how many poor matches were dropped. If Jev is unreachable, the server falls back to keyword scoring so tools still return data.
+
 ## Use Cases
 
 - **Legal Researchers** – Quick access to bills, regulations, and court opinions
@@ -223,7 +246,8 @@ Find court decisions:
 ## Technical Details
 
 **Built with:** Node.js, TypeScript, MCP SDK  
-**Dependencies:** `@modelcontextprotocol/sdk`, `superagent`, `zod`  
+**Dependencies:** `@modelcontextprotocol/sdk`, `axios`, `fast-xml-parser`, `zod`  
+**Optional:** [Jev](https://docs.typesafe.ai) via `TYPESAFE_API_KEY` for high-confidence search filtering  
 **Platforms:** macOS, Windows, Linux
 
 ## Contributing

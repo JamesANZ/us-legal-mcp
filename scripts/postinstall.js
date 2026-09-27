@@ -85,6 +85,8 @@ const serverConfig = {
     COURT_LISTENER_API_KEY:
       process.env.COURT_LISTENER_API_KEY ||
       "258021eb4dd1901f1acfdb3f521fb8a7837a9097",
+    GOVINFO_API_KEY: process.env.GOVINFO_API_KEY || "",
+    TYPESAFE_API_KEY: process.env.TYPESAFE_API_KEY || "",
   },
 };
 
@@ -110,6 +112,27 @@ if (alreadyConfigured) {
   ) {
     serverConfig.env.COURT_LISTENER_API_KEY =
       config.mcpServers[serverName].env.COURT_LISTENER_API_KEY;
+  }
+  if (
+    config.mcpServers[serverName].env &&
+    config.mcpServers[serverName].env.GOVINFO_API_KEY
+  ) {
+    serverConfig.env.GOVINFO_API_KEY =
+      config.mcpServers[serverName].env.GOVINFO_API_KEY;
+  }
+  if (
+    config.mcpServers[serverName].env &&
+    config.mcpServers[serverName].env.TYPESAFE_API_KEY
+  ) {
+    serverConfig.env.TYPESAFE_API_KEY =
+      config.mcpServers[serverName].env.TYPESAFE_API_KEY;
+  }
+  if (
+    config.mcpServers[serverName].env &&
+    config.mcpServers[serverName].env.JEV_API_KEY
+  ) {
+    serverConfig.env.JEV_API_KEY =
+      config.mcpServers[serverName].env.JEV_API_KEY;
   }
 }
 

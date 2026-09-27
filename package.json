@@ -6,6 +6,8 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "tsx src/jev.test.ts",
     "postinstall": "node scripts/postinstall.js",
     "generate-cursor-link": "node scripts/generate-cursor-install-link.js"
   },

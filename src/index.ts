@@ -16,6 +16,21 @@ import {
   matchingCuratedActs,
   type CuratedAct,
 } from "./data/crypto-legislation.js";
+import {
+  billToJevText,
+  curatedActToJevText,
+  documentToJevText,
+  filterHighConfidenceMatches,
+  formatJevBadge,
+  formatJevFilterNote,
+  isJevEnabled,
+  mergeJevNotes,
+  newsToJevText,
+  noHighConfidenceText,
+  opinionToJevText,
+  type JevFilterResult,
+  type JevMatch,
+} from "./jev.js";
 
 // Initialize US Legal API
 const apiKeys = {
@@ -36,6 +51,13 @@ console.error(
 );
 console.error(
   `   GovInfo: ${apiKeys.govInfo ? "✅ Set" : "⚠️  Using DEMO_KEY (rate-limited)"}`,
+);
+console.error(
+  `   Jev (TypeSafe): ${
+    isJevEnabled()
+      ? "✅ Enabled — search tools return high-confidence matches only"
+      : "⚪ Optional — set TYPESAFE_API_KEY (or JEV_API_KEY) to filter poor matches"
+  }`,
 );
 
 const usLegalAPI = new USLegalAPI(apiKeys);
@@ -126,6 +148,28 @@ function formatRegulatorItems(
     .join("\n\n");
 }
 
+function jevEmptyMessage<T>(
+  query: string,
+  filtered: JevFilterResult<T>,
+  fallback: string,
+): string | null {
+  if (filtered.applied && filtered.matches.length === 0 && filtered.considered > 0) {
+    return noHighConfidenceText(query, filtered.considered);
+  }
+  if (filtered.matches.length === 0) {
+    return fallback;
+  }
+  return null;
+}
+
+function withJevNote(body: string, note: string): string {
+  return note ? `${body}\n\n${note}` : body;
+}
+
+function itemsFromJev<T>(filtered: JevFilterResult<T>): T[] {
+  return filtered.matches.map((m: JevMatch<T>) => m.item);
+}
+
 // Create MCP server
 const server = new Server(
   {
@@ -159,30 +203,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             limit,
             { strict: true },
           );
-
-          if (bills.length === 0) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `**Congress Bills Search Results for "${query}"**\n\nNo bills found matching your search query.\n\n**Troubleshooting:**\n- Try broader or different search terms (e.g., "border" instead of "immigration")\n- Verify Congress.gov API key is set (CONGRESS_API_KEY)\n- Try a different Congress session (e.g., 118 instead of 119)\n- The API may have returned results but they were filtered for low relevance\n- Note: Some topics may have limited federal legislation\n\n**Tip:** Use \`get_recent_bills\` to see recent legislation regardless of topic.`,
-                },
-              ],
-            };
+          const jev = await filterHighConfidenceMatches(
+            query,
+            bills,
+            billToJevText,
+          );
+          const empty = jevEmptyMessage(
+            query,
+            jev,
+            `**Congress Bills Search Results for "${query}"**\n\nNo bills found matching your search query.\n\n**Troubleshooting:**\n- Try broader or different search terms (e.g., "border" instead of "immigration")\n- Verify Congress.gov API key is set (CONGRESS_API_KEY)\n- Try a different Congress session (e.g., 118 instead of 119)\n- The API may have returned results but they were filtered for low relevance\n- Note: Some topics may have limited federal legislation\n\n**Tip:** Use \`get_recent_bills\` to see recent legislation regardless of topic.`,
+          );
+          if (empty) {
+            return { content: [{ type: "text", text: empty }] };
           }
 
           return {
             content: [
               {
                 type: "text",
-                text:
-                  `**Congress Bills Search Results for "${query}"**\n\nFound ${bills.length} result(s)\n\n` +
-                  bills
-                    .map(
-                      (bill, index) =>
-                        `${index + 1}. **${bill.title}**\n   ${bill.type} ${bill.number} - ${bill.latestAction?.text || "No status"}\n   ${bill.url}\n`,
-                    )
-                    .join("\n"),
+                text: withJevNote(
+                  `**Congress Bills Search Results for "${query}"**\n\nFound ${jev.matches.length} result(s)\n\n` +
+                    jev.matches
+                      .map(
+                        ({ item: bill, relevance }, index) =>
+                          `${index + 1}. **${bill.title}**${formatJevBadge(jev.applied, relevance)}\n   ${bill.type} ${bill.number} - ${bill.latestAction?.text || "No status"}\n   ${bill.url}\n`,
+                      )
+                      .join("\n"),
+                  formatJevFilterNote(jev),
+                ),
               },
             ],
           };
@@ -204,19 +252,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           query,
           limit,
         );
+        const jev = await filterHighConfidenceMatches(
+          query,
+          documents,
+          documentToJevText,
+        );
+        const empty = jevEmptyMessage(
+          query,
+          jev,
+          `**Federal Register Search Results for "${query}"**\n\nNo documents found matching your search query.`,
+        );
+        if (empty) {
+          return { content: [{ type: "text", text: empty }] };
+        }
 
         return {
           content: [
             {
               type: "text",
-              text:
-                `**Federal Register Search Results for "${query}"**\n\nFound ${documents.length} result(s)\n\n` +
-                documents
-                  .map(
-                    (doc, index) =>
-                      `${index + 1}. **${doc.title}**\n   ${doc.document_number} - ${doc.agency_names?.[0] || "Unknown agency"}\n   ${doc.html_url}\n`,
-                  )
-                  .join("\n"),
+              text: withJevNote(
+                `**Federal Register Search Results for "${query}"**\n\nFound ${jev.matches.length} result(s)\n\n` +
+                  jev.matches
+                    .map(
+                      ({ item: doc, relevance }, index) =>
+                        `${index + 1}. **${doc.title}**${formatJevBadge(jev.applied, relevance)}\n   ${doc.document_number} - ${doc.agency_names?.[0] || "Unknown agency"}\n   ${doc.html_url}\n`,
+                    )
+                    .join("\n"),
+                formatJevFilterNote(jev),
+              ),
             },
           ],
         };
@@ -230,7 +293,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // filtering we end up returning whatever happens to be at the top
         // of the listing (e.g. "Ten Commandments" or "Reserved for the
         // Speaker"). Strict mode drops unmatched bills instead of padding.
-        const [bills, regulations, opinions] = await Promise.all([
+        const [rawBills, rawRegulations, rawOpinions] = await Promise.all([
           usLegalAPI.congress.searchBills(
             query,
             undefined,
@@ -248,53 +311,72 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ),
         ]);
 
+        const [billsJev, regsJev, opinionsJev] = await Promise.all([
+          filterHighConfidenceMatches(query, rawBills, billToJevText),
+          filterHighConfidenceMatches(query, rawRegulations, documentToJevText),
+          filterHighConfidenceMatches(query, rawOpinions, opinionToJevText),
+        ]);
+        const bills = billsJev.matches;
+        const regulations = regsJev.matches;
+        const opinions = opinionsJev.matches;
+        const jevNote = mergeJevNotes([billsJev, regsJev, opinionsJev]);
+
         return {
           content: [
             {
               type: "text",
-              text:
+              text: withJevNote(
                 `**Comprehensive US Legal Search Results for "${query}"**\n\n` +
-                `- Bills: ${bills.length}\n` +
-                `- Regulations: ${regulations.length}\n` +
-                `- Court Opinions: ${opinions.length}\n\n` +
-                `**Top Results:**\n\n` +
-                (bills.length > 0
-                  ? `**Congress Bills (${bills.length}):**\n` +
-                    bills
-                      .slice(0, 3)
-                      .map(
-                        (bill, index) =>
-                          `${index + 1}. **${bill.title}** (Bill)\n   ${bill.type} ${bill.number}\n   ${bill.url}\n`,
-                      )
-                      .join("\n") +
-                    "\n\n"
-                  : "") +
-                (regulations.length > 0
-                  ? `**Federal Register (${regulations.length}):**\n` +
-                    regulations
-                      .slice(0, 3)
-                      .map(
-                        (doc, index) =>
-                          `${index + 1}. **${doc.title}** (Regulation)\n   ${doc.document_number}\n   ${doc.html_url}\n`,
-                      )
-                      .join("\n") +
-                    "\n\n"
-                  : "") +
-                (opinions.length > 0
-                  ? `**Court Opinions (${opinions.length}):**\n` +
-                    opinions
-                      .slice(0, 3)
-                      .map(
-                        (opinion, index) =>
-                          `${index + 1}. **${opinion.case_name}** (Court Case)\n   ${opinion.court} - ${opinion.date_filed}\n   ${opinion.url}\n`,
-                      )
-                      .join("\n")
-                  : "") +
-                (bills.length === 0 &&
-                regulations.length === 0 &&
-                opinions.length === 0
-                  ? `No results found across available sources.`
-                  : ""),
+                  `- Bills: ${bills.length}\n` +
+                  `- Regulations: ${regulations.length}\n` +
+                  `- Court Opinions: ${opinions.length}\n\n` +
+                  `**Top Results:**\n\n` +
+                  (bills.length > 0
+                    ? `**Congress Bills (${bills.length}):**\n` +
+                      bills
+                        .slice(0, 3)
+                        .map(
+                          ({ item: bill, relevance }, index) =>
+                            `${index + 1}. **${bill.title}** (Bill)${formatJevBadge(billsJev.applied, relevance)}\n   ${bill.type} ${bill.number}\n   ${bill.url}\n`,
+                        )
+                        .join("\n") +
+                      "\n\n"
+                    : "") +
+                  (regulations.length > 0
+                    ? `**Federal Register (${regulations.length}):**\n` +
+                      regulations
+                        .slice(0, 3)
+                        .map(
+                          ({ item: doc, relevance }, index) =>
+                            `${index + 1}. **${doc.title}** (Regulation)${formatJevBadge(regsJev.applied, relevance)}\n   ${doc.document_number}\n   ${doc.html_url}\n`,
+                        )
+                        .join("\n") +
+                      "\n\n"
+                    : "") +
+                  (opinions.length > 0
+                    ? `**Court Opinions (${opinions.length}):**\n` +
+                      opinions
+                        .slice(0, 3)
+                        .map(
+                          ({ item: opinion, relevance }, index) =>
+                            `${index + 1}. **${opinion.case_name}** (Court Case)${formatJevBadge(opinionsJev.applied, relevance)}\n   ${opinion.court} - ${opinion.date_filed}\n   ${opinion.url}\n`,
+                        )
+                        .join("\n")
+                    : "") +
+                  (bills.length === 0 &&
+                  regulations.length === 0 &&
+                  opinions.length === 0
+                    ? billsJev.applied || regsJev.applied || opinionsJev.applied
+                      ? noHighConfidenceText(
+                          query,
+                          billsJev.considered +
+                            regsJev.considered +
+                            opinionsJev.considered,
+                        )
+                      : `No results found across available sources.`
+                    : ""),
+                jevNote,
+              ),
             },
           ],
         };
@@ -380,22 +462,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         try {
-          const opinions = await usLegalAPI.courtListener.searchOpinions(
+          const rawOpinions = await usLegalAPI.courtListener.searchOpinions(
             query,
             court,
             limit,
           );
-
-          if (opinions.length === 0) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `**Court Opinions Search Results for "${query}"**\n\nNo court opinions found matching your search.\n\n**Troubleshooting:**\n- Try different search terms or broader keywords\n- Verify CourtListener API key is set (COURT_LISTENER_API_KEY)\n- Try specific court filters (e.g., "scotus" for Supreme Court)\n- Note: Some topics may have limited federal court cases`,
-                },
-              ],
-            };
+          const jev = await filterHighConfidenceMatches(
+            query,
+            rawOpinions,
+            opinionToJevText,
+          );
+          const empty = jevEmptyMessage(
+            query,
+            jev,
+            `**Court Opinions Search Results for "${query}"**\n\nNo court opinions found matching your search.\n\n**Troubleshooting:**\n- Try different search terms or broader keywords\n- Verify CourtListener API key is set (COURT_LISTENER_API_KEY)\n- Try specific court filters (e.g., "scotus" for Supreme Court)\n- Note: Some topics may have limited federal court cases`,
+          );
+          if (empty) {
+            return { content: [{ type: "text", text: empty }] };
           }
+
+          const opinions = itemsFromJev(jev);
 
           // Fetch full text for top 3-5 results that don't have text
           const topOpinionsToFetch = opinions
@@ -450,7 +536,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               }
             }
 
-            let result = `${index + 1}. **${opinion.case_name}${opinion.case_name_full ? ` (${opinion.case_name_full})` : ""}**\n`;
+            const jevScore = jev.matches[index]?.relevance ?? 1;
+            let result = `${index + 1}. **${opinion.case_name}${opinion.case_name_full ? ` (${opinion.case_name_full})` : ""}**${formatJevBadge(jev.applied, jevScore)}\n`;
             result += `   Court: ${opinion.court} | Date: ${opinion.date_filed}\n`;
             if (opinion.citation) {
               result += `   Citation: ${opinion.citation}\n`;
@@ -473,7 +560,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             content: [
               {
                 type: "text",
-                text: `**Court Opinions Search Results for "${query}"**\n\nFound ${opinions.length} result(s)\n\n${formattedOpinions.join("\n\n")}`,
+                text: withJevNote(
+                  `**Court Opinions Search Results for "${query}"**\n\nFound ${opinions.length} result(s)\n\n${formattedOpinions.join("\n\n")}`,
+                  formatJevFilterNote(jev),
+                ),
               },
             ],
           };
@@ -881,11 +971,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           source,
           limit,
         );
+        const jev = await filterHighConfidenceMatches(
+          query,
+          items,
+          newsToJevText,
+        );
+        const empty = jevEmptyMessage(
+          query,
+          jev,
+          `# Regulator News for "${query}" (${source}) - 0 result(s)\n\n_No results._`,
+        );
+        if (empty) {
+          return { content: [{ type: "text", text: empty }] };
+        }
         return {
           content: [
             {
               type: "text",
-              text: `# Regulator News for "${query}" (${source}) - ${items.length} result(s)\n\n${formatRegulatorItems(items)}`,
+              text: withJevNote(
+                `# Regulator News for "${query}" (${source}) - ${jev.matches.length} result(s)\n\n${formatRegulatorItems(itemsFromJev(jev))}`,
+                formatJevFilterNote(jev),
+              ),
             },
           ],
         };
@@ -904,7 +1010,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const newsLimit = limit;
 
         const isDigitalAssetQuery = queryMatchesDigitalAssets(query);
-        const curatedMatches = matchingCuratedActs(query);
+        let curatedMatches = matchingCuratedActs(query);
         const queryLower = query.toLowerCase();
         const queryTerms = queryLower.split(/\s+/).filter((t) => t.length > 2);
 
@@ -1028,18 +1134,49 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const hay = `${d.title || ""} ${d.abstract || ""}`.toLowerCase();
           return fedRegKeywords.some((k) => hay.includes(k));
         });
-        const fedRegResults = relevantFedReg.slice(0, fedRegLimit);
+        let fedRegResults = relevantFedReg.slice(0, fedRegLimit);
 
         // 5. Regulator news already uses its own scoring in searchRegulatorNews.
-        const regulatorItems = await usLegalAPI
+        let regulatorItems = await usLegalAPI
           .searchRegulatorNews(query, "all", newsLimit)
           .catch(() => []);
+
+        const [curatedJev, billsJev, fedJev, newsJev] = await Promise.all([
+          filterHighConfidenceMatches(
+            query,
+            curatedMatches,
+            curatedActToJevText,
+          ),
+          filterHighConfidenceMatches(query, mergedBills, (sb) =>
+            billToJevText(sb.bill),
+          ),
+          filterHighConfidenceMatches(
+            query,
+            fedRegResults,
+            documentToJevText,
+          ),
+          filterHighConfidenceMatches(
+            query,
+            regulatorItems,
+            newsToJevText,
+          ),
+        ]);
+        curatedMatches = itemsFromJev(curatedJev);
+        const filteredBills = itemsFromJev(billsJev);
+        fedRegResults = itemsFromJev(fedJev);
+        regulatorItems = itemsFromJev(newsJev);
+        const jevNote = mergeJevNotes([
+          curatedJev,
+          billsJev,
+          fedJev,
+          newsJev,
+        ]);
 
         const sections: string[] = [];
         sections.push(
           `# Digital-Asset Regulation Search: "${query}"\n\n` +
             `- Curated acts matched: ${curatedMatches.length}\n` +
-            `- Bills: ${mergedBills.length}\n` +
+            `- Bills: ${filteredBills.length}\n` +
             `- Federal Register: ${fedRegResults.length}\n` +
             `- Regulator news: ${regulatorItems.length}` +
             (isDigitalAssetQuery
@@ -1051,18 +1188,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sections.push(
             `## Curated Acts\n\n` +
               curatedMatches
-                .map(
-                  (a: CuratedAct) =>
-                    `- **${a.shortTitle}** (${a.billId.toUpperCase()}) - ${a.status}\n  Use \`get_curated_act\` with slug \`${a.slug}\` for the full record.`,
-                )
+                .map((a: CuratedAct, i) => {
+                  const relevance = curatedJev.matches[i]?.relevance ?? 1;
+                  return `- **${a.shortTitle}** (${a.billId.toUpperCase()}) - ${a.status}${formatJevBadge(curatedJev.applied, relevance)}\n  Use \`get_curated_act\` with slug \`${a.slug}\` for the full record.`;
+                })
                 .join("\n"),
           );
         }
 
-        if (mergedBills.length) {
+        if (filteredBills.length) {
           sections.push(
             `## Congress Bills\n\n` +
-              mergedBills
+              filteredBills
                 .map((sb, i) => {
                   const b = sb.bill;
                   const label = sb.source === "tracked" ? " _(tracked)_" : "";
@@ -1070,7 +1207,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   const action = b.latestAction
                     ? `(${b.latestAction.actionDate || "n/a"}) ${b.latestAction.text}`
                     : "No latest action";
-                  return `${i + 1}. **${b.title}**${label}${note}\n   ${String(b.type || "").toUpperCase()} ${b.number} (${b.congress}th Congress) - ${action}\n   ${b.url || `https://www.congress.gov/bill/${b.congress}th-congress/${b.type}/${b.number}`}`;
+                  const relevance = billsJev.matches[i]?.relevance ?? 1;
+                  return `${i + 1}. **${b.title}**${label}${note}${formatJevBadge(billsJev.applied, relevance)}\n   ${String(b.type || "").toUpperCase()} ${b.number} (${b.congress}th Congress) - ${action}\n   ${b.url || `https://www.congress.gov/bill/${b.congress}th-congress/${b.type}/${b.number}`}`;
                 })
                 .join("\n\n"),
           );
@@ -1080,10 +1218,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sections.push(
             `## Federal Register\n\n` +
               fedRegResults
-                .map(
-                  (d, i) =>
-                    `${i + 1}. **${d.title}**\n   ${d.document_number} - ${(d.agency_names || [])[0] || "Unknown agency"}\n   ${d.html_url}`,
-                )
+                .map((d, i) => {
+                  const relevance = fedJev.matches[i]?.relevance ?? 1;
+                  return `${i + 1}. **${d.title}**${formatJevBadge(fedJev.applied, relevance)}\n   ${d.document_number} - ${(d.agency_names || [])[0] || "Unknown agency"}\n   ${d.html_url}`;
+                })
                 .join("\n\n"),
           );
         }
@@ -1096,12 +1234,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         if (
           curatedMatches.length === 0 &&
-          mergedBills.length === 0 &&
+          filteredBills.length === 0 &&
           fedRegResults.length === 0 &&
           regulatorItems.length === 0
         ) {
-          sections.push("\n_No results from any source._");
+          const considered =
+            curatedJev.considered +
+            billsJev.considered +
+            fedJev.considered +
+            newsJev.considered;
+          sections.push(
+            curatedJev.applied ||
+              billsJev.applied ||
+              fedJev.applied ||
+              newsJev.applied
+              ? noHighConfidenceText(query, considered)
+              : "\n_No results from any source._",
+          );
         }
+        if (jevNote) sections.push(jevNote);
         return { content: [{ type: "text", text: sections.join("\n\n") }] };
       }
 
@@ -1133,7 +1284,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: "search_congress_bills",
-        description: "Search for bills and resolutions in Congress.gov",
+        description:
+          "Search for bills and resolutions in Congress.gov. When TYPESAFE_API_KEY is set, only high-confidence Jev matches are returned.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1162,7 +1314,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "search_federal_register",
         description:
-          "Search for documents in the Federal Register (regulations, executive orders, etc.)",
+          "Search for documents in the Federal Register (regulations, executive orders, etc.). When TYPESAFE_API_KEY is set, only high-confidence Jev matches are returned.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1185,7 +1337,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "search_all_legal",
         description:
-          "Comprehensive search across all US legal sources (Congress, Federal Register, Court Opinions)",
+          "Comprehensive search across all US legal sources (Congress, Federal Register, Court Opinions). When TYPESAFE_API_KEY is set, only high-confidence Jev matches are returned.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1246,7 +1398,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "search_court_opinions",
         description:
-          "Search for court opinions and decisions from CourtListener (federal and state courts)",
+          "Search for court opinions and decisions from CourtListener (federal and state courts). When TYPESAFE_API_KEY is set, only high-confidence Jev matches are returned.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1461,7 +1613,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "search_regulator_news",
         description:
-          "Keyword search across regulator press-release feeds (OCC, SEC, CFTC, Fed, Treasury, FinCEN). Useful for stablecoin/CBDC/digital-asset monitoring.",
+          "Keyword search across regulator press-release feeds (OCC, SEC, CFTC, Fed, Treasury, FinCEN). Useful for stablecoin/CBDC/digital-asset monitoring. When TYPESAFE_API_KEY is set, only high-confidence Jev matches are returned.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1488,7 +1640,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "search_digital_asset_regulation",
         description:
-          "Aggregate search across Congress bills, Federal Register, and all regulator news feeds. Scoped to digital-asset / crypto / stablecoin topics.",
+          "Aggregate search across Congress bills, Federal Register, and all regulator news feeds. Scoped to digital-asset / crypto / stablecoin topics. When TYPESAFE_API_KEY is set, only high-confidence Jev matches are returned.",
         inputSchema: {
           type: "object",
           properties: {
