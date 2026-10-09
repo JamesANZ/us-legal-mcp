@@ -373,6 +373,89 @@ export function parseBillId(billId: string): {
   };
 }
 
+function normalizeCongress(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const n =
+    typeof value === "number" ? value : parseInt(String(value).trim(), 10);
+  if (!Number.isFinite(n) || n <= 0) return undefined;
+  return n;
+}
+
+// Longer bill types must be tried before their prefixes (hconres before hr).
+const BILL_PACKAGE_RE =
+  /^BILLS-(\d+)(hconres|sconres|hjres|sjres|hres|sres|hr|s)(\d+)([a-z]+)$/i;
+
+const BILL_STAGE_RANK: Record<string, number> = {
+  enr: 100,
+  es: 80,
+  eh: 80,
+  rfs: 70,
+  rs: 60,
+  rh: 60,
+  pcs: 50,
+  rds: 50,
+  cps: 40,
+  cph: 40,
+  ih: 10,
+  is: 10,
+};
+
+function buildGovInfoBillQuery(query: string, congress?: number): string {
+  const phrases = query
+    .split(/\s+or\s+/i)
+    .map((part) => part.replace(/"/g, "").replace(/\s+/g, " ").trim())
+    .filter((part) => part.length > 0);
+  const titleClause =
+    phrases.length > 1
+      ? `(${phrases.map((part) => `title:"${part}"`).join(" or ")})`
+      : `title:"${phrases[0] || query}"`;
+  const parts = ["collection:BILLS"];
+  if (congress) parts.push(`congress:${congress}`);
+  parts.push(titleClause);
+  return parts.join(" and ");
+}
+
+// GovInfo package ids look like BILLS-119s1582enr. Collapse versions of the
+// same bill and keep the furthest-along stage.
+function govInfoResultsToBills(results: any[]): any[] {
+  const best = new Map<string, { rank: number; bill: any }>();
+  for (const result of results) {
+    const packageId = String(result?.packageId || "");
+    const match = packageId.match(BILL_PACKAGE_RE);
+    if (!match) continue;
+    const congress = parseInt(match[1], 10);
+    const type = match[2].toUpperCase();
+    const number = parseInt(match[3], 10);
+    const stage = match[4].toLowerCase();
+    const rank = BILL_STAGE_RANK[stage] ?? 0;
+    const key = `${congress}/${type}/${number}`;
+    const title = String(result.title || "");
+    const segments = title
+      .split(";")
+      .map((part: string) => part.trim())
+      .filter(Boolean);
+    const bill = {
+      congress,
+      type,
+      number,
+      title: segments[0] || title,
+      shortTitle:
+        segments.length > 1 ? segments[segments.length - 1] : undefined,
+      url: `https://api.congress.gov/v3/bill/${congress}/${type.toLowerCase()}/${number}?format=json`,
+      introducedDate: result.dateIssued,
+      latestAction: result.lastModified
+        ? {
+            actionDate: String(result.lastModified).slice(0, 10),
+            text: `Text version ${stage}`,
+          }
+        : undefined,
+    };
+    const prev = best.get(key);
+    if (!prev || rank >= prev.rank) best.set(key, { rank, bill });
+  }
+  return [...best.values()].map((entry) => entry.bill);
+}
+
 // Congress.gov API Functions
 export class CongressAPI {
   private apiKey: string;
@@ -395,27 +478,43 @@ export class CongressAPI {
       const minScore = options?.minScore ?? (strict ? 8 : 5);
       const fetchLimit = Math.min(limit * (strict ? 12 : 5), 250);
 
-      // Default to the current Congress when strict: keyword-less listings
-      // from earlier Congresses are almost always noise for current-policy
-      // queries (e.g. stablecoin / digital asset).
-      const effectiveCongress = congress ?? (strict ? 119 : undefined);
+      // Congress.gov /bill ignores `q` and ignores `congress` unless it is a
+      // path segment. Keyword search goes through GovInfo, which filters
+      // bill titles. A bare list uses /bill/{congress} and a literal "+"
+      // sort (URLSearchParams would encode it as %2B, which this API drops).
+      const normalizedCongress = normalizeCongress(congress);
+      const effectiveCongress =
+        normalizedCongress ?? (strict ? 119 : undefined);
+      const queryText = typeof query === "string" ? query.trim() : "";
+      const govQuery = queryText
+        ? buildGovInfoBillQuery(queryText, effectiveCongress)
+        : "";
 
-      const params = new URLSearchParams({
-        q: query,
-        limit: fetchLimit.toString(),
-        format: "json",
-        sort: "updateDate+desc",
-        ...(this.apiKey && { api_key: this.apiKey }),
-        ...(effectiveCongress && { congress: effectiveCongress.toString() }),
-      });
-
-      const baseUrl = effectiveCongress
-        ? `${API_ENDPOINTS.CONGRESS}/bill/${effectiveCongress}`
-        : `${API_ENDPOINTS.CONGRESS}/bill`;
-
-      const response = await axios.get(`${baseUrl}?${params}`);
-
-      const bills = (response.data.bills || []).map((bill: any) => ({
+      let rawBills: any[] = [];
+      if (queryText) {
+        const govKey = process.env.GOVINFO_API_KEY || "DEMO_KEY";
+        const pageSize = Math.min(100, Math.max(Number(limit) * 6 || 20, 20));
+        const govResponse = await axios.post(
+          `${API_ENDPOINTS.GOVINFO}/search?api_key=${encodeURIComponent(govKey)}`,
+          { query: govQuery, pageSize, offsetMark: "*" },
+          { timeout: 20000, headers: { "Content-Type": "application/json" } },
+        );
+        rawBills = govInfoResultsToBills(govResponse.data?.results || []);
+      } else {
+        const params = new URLSearchParams({
+          limit: fetchLimit.toString(),
+          format: "json",
+          ...(this.apiKey && { api_key: this.apiKey }),
+        });
+        const baseUrl = effectiveCongress
+          ? `${API_ENDPOINTS.CONGRESS}/bill/${effectiveCongress}`
+          : `${API_ENDPOINTS.CONGRESS}/bill`;
+        const response = await axios.get(
+          `${baseUrl}?${params.toString()}&sort=updateDate+desc`,
+        );
+        rawBills = response.data.bills || [];
+      }
+      const bills = rawBills.map((bill: any) => ({
         congress: bill.congress,
         type: bill.type,
         number: bill.number,
@@ -449,21 +548,6 @@ export class CongressAPI {
       // Sort by relevance (highest first)
       scoredBills.sort((a: any, b: any) => b.relevanceScore - a.relevanceScore);
 
-      // Log scoring for debugging (first few bills)
-      if (scoredBills.length > 0) {
-        console.error(
-          `Congress Bills Relevance Scores (top 5): ${scoredBills
-            .slice(0, 5)
-            .map(
-              (b: any) =>
-                `${b.title.substring(0, 40)}... (score: ${b.relevanceScore})`,
-            )
-            .join(", ")}`,
-        );
-      }
-
-      // Use smart filtering: prioritize high-scoring bills but always return top results
-      // Only filter if we have many high-scoring options
       const highRelevanceBills = scoredBills.filter(
         (bill: any) => bill.relevanceScore >= minScore,
       );
@@ -567,16 +651,18 @@ export class CongressAPI {
     limit: number = 20,
   ): Promise<CongressBill[]> {
     try {
+      const congressNum = normalizeCongress(congress);
       const params = new URLSearchParams({
         limit: limit.toString(),
         format: "json",
         ...(this.apiKey && { api_key: this.apiKey }),
-        ...(congress && { congress: congress.toString() }),
       });
+      const recentPath = congressNum
+        ? `${API_ENDPOINTS.CONGRESS}/bill/${congressNum}`
+        : `${API_ENDPOINTS.CONGRESS}/bill`;
+      const recentUrl = `${recentPath}?${params.toString()}&sort=updateDate+desc`;
 
-      const response = await axios.get(
-        `${API_ENDPOINTS.CONGRESS}/bill?${params}`,
-      );
+      const response = await axios.get(recentUrl);
 
       return (
         response.data.bills?.map((bill: any) => ({
@@ -1412,12 +1498,7 @@ export class RegulationsGovAPI {
 // ------------------------------------------------------------------
 
 export type RegulatorSource =
-  | "occ"
-  | "sec"
-  | "cftc"
-  | "fed"
-  | "treasury"
-  | "fincen";
+  "occ" | "sec" | "cftc" | "fed" | "treasury" | "fincen";
 
 export class OCCAPI {
   // OCC publishes an RSS feed of news releases (and related items).
