@@ -1,0 +1,8 @@
+node_modules
+build
+dist
+.git
+coverage
+.env
+.env.*
+.cursor
