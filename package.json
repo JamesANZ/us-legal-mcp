@@ -4,8 +4,11 @@
   "description": "MCP server for US legal data - Congress, Federal Register, US Code, and more",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "us-legal-mcp": "./dist/index.js"
+  },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && chmod 755 dist/index.js",
     "start": "node dist/index.js",
     "test": "tsx src/jev.test.ts",
     "postinstall": "node scripts/postinstall.js",
